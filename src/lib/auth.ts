@@ -3,7 +3,7 @@ import { cookies } from "next/headers";
 import { NextRequest } from "next/server";
 
 const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET!);
-const COOKIE_NAME = "token";
+export const COOKIE_NAME = "token";
 
 export interface JwtPayload {
   id: string;
