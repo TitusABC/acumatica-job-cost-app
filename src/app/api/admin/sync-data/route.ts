@@ -35,7 +35,10 @@ async function runSync(req: NextRequest): Promise<NextResponse> {
 
     if (!loginResp.ok) throw new Error(`Acumatica login failed: ${loginResp.status}`);
 
-    const sessionCookie = (loginResp.headers.get("set-cookie") ?? "").split(";")[0];
+    // Extract ALL cookies (Acumatica sets multiple: ASP.NET_SessionId + .ASPXAUTH)
+    const allSetCookies: string[] = (loginResp.headers as any).getSetCookie?.() ??
+      (loginResp.headers.get("set-cookie") ? [loginResp.headers.get("set-cookie")!] : []);
+    const sessionCookie = allSetCookies.map((c) => c.split(";")[0]).join("; ");
 
     // 2. Paginate through Project endpoint
     const allProjects: Record<string, unknown>[] = [];
