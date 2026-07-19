@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/admin/sync-data",
+      "schedule": "0 6 * * *"
+    }
+  ]
+}
