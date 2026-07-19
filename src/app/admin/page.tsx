@@ -15,10 +15,16 @@ interface CurrentUser {
   role: string;
 }
 
+interface SyncInfo {
+  synced_at: string;
+  row_count: number;
+  status: string;
+}
+
 export default function AdminPage() {
   const router = useRouter();
-  const [users, setUsers] = useState<User[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -26,19 +32,30 @@ export default function AdminPage() {
   const [newUsername, setNewUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newRole, setNewRole] = useState("standard");
-  const [addError, setAddError] = useState("");
   const [addLoading, setAddLoading] = useState(false);
+  const [addError, setAddError] = useState("");
 
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editUsername, setEditUsername] = useState("");
   const [editPassword, setEditPassword] = useState("");
-  const [editRole, setEditRole] = useState("");
+  const [editRole, setEditRole] = useState("standard");
   const [editError, setEditError] = useState("");
   const [editLoading, setEditLoading] = useState(false);
 
+  const [syncInfo, setSyncInfo] = useState<SyncInfo | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState("");
+  const [syncError, setSyncError] = useState("");
+
   useEffect(() => {
-    fetch("/api/auth/me").then((r) => r.json()).then((d) => { if (d.user) setCurrentUser(d.user); }).catch(() => {});
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.user) setCurrentUser(d.user);
+        else router.push("/");
+      });
     loadUsers();
+    loadSyncInfo();
   }, []);
 
   async function loadUsers() {
@@ -52,6 +69,35 @@ export default function AdminPage() {
       setError(err instanceof Error ? err.message : "Failed to load users");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadSyncInfo() {
+    try {
+      const res = await fetch("/api/admin/sync-info");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.syncInfo) setSyncInfo(data.syncInfo);
+      }
+    } catch {
+      // ignore — sync info is optional
+    }
+  }
+
+  async function handleSync() {
+    setSyncing(true);
+    setSyncResult("");
+    setSyncError("");
+    try {
+      const res = await fetch("/api/admin/sync-data", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Sync failed");
+      setSyncResult(`Sync complete — ${data.rowCount} jobs loaded.`);
+      await loadSyncInfo();
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -85,7 +131,8 @@ export default function AdminPage() {
     if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
     try {
       const res = await fetch(`/api/admin/users/${userId}`, { method: "DELETE" });
-      if (!res.ok) { const data = await res.json(); throw new Error(data.error); }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
       await loadUsers();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to delete user");
@@ -166,7 +213,7 @@ export default function AdminPage() {
             <h2 className="text-lg font-semibold text-gray-800">User Management</h2>
             <p className="text-sm text-gray-500">Manage user access and roles</p>
           </div>
-          <button onClick={() => { setShowAddForm(true); setAddError(""); }} className="bg-amber-400 hover:bg-amber-300 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition flex items-center gap-2">
+          <button onClick={() => setShowAddForm(!showAddForm)} className="flex items-center gap-2 bg-amber-400 hover:bg-amber-300 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
@@ -175,7 +222,27 @@ export default function AdminPage() {
         </header>
 
         <div className="flex-1 overflow-y-auto p-6">
-          {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm mb-4">{error}</div>}
+          {error && <p className="text-red-500 mb-4 text-sm">{error}</p>}
+
+          {/* Data Sync Section */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
+            <h3 className="text-base font-semibold text-gray-800 mb-1">Data Sync</h3>
+            {syncInfo && (
+              <p className="text-sm text-gray-500 mb-3">
+                Last sync: {new Date(syncInfo.synced_at).toLocaleString()} — {syncInfo.row_count} jobs ({syncInfo.status})
+              </p>
+            )}
+            {!syncInfo && <p className="text-sm text-gray-400 mb-3">No sync recorded yet.</p>}
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold rounded-lg px-4 py-2 text-sm transition"
+            >
+              {syncing ? "Syncing..." : "Refresh Data Now"}
+            </button>
+            {syncResult && <p className="mt-2 text-sm text-green-600">{syncResult}</p>}
+            {syncError && <p className="mt-2 text-sm text-red-600">{syncError}</p>}
+          </div>
 
           {showAddForm && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -196,7 +263,7 @@ export default function AdminPage() {
                     <option value="admin">Admin</option>
                   </select>
                 </div>
-                {addError && <div className="sm:col-span-2 text-red-600 text-sm">{addError}</div>}
+                {addError && <p className="sm:col-span-2 text-red-500 text-sm">{addError}</p>}
                 <div className="sm:col-span-2 flex gap-3">
                   <button type="submit" disabled={addLoading} className="bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition">
                     {addLoading ? "Creating..." : "Create User"}
@@ -227,7 +294,7 @@ export default function AdminPage() {
                       <option value="admin">Admin</option>
                     </select>
                   </div>
-                  {editError && <p className="text-red-600 text-sm">{editError}</p>}
+                  {editError && <p className="text-red-500 text-sm">{editError}</p>}
                   <div className="flex gap-3 pt-2">
                     <button type="submit" disabled={editLoading} className="bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition">
                       {editLoading ? "Saving..." : "Save Changes"}
