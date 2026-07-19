@@ -123,7 +123,7 @@ async function runSync(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: true, rowCount: jobData.length });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : "Unknown error";
-    await supabaseAdmin.from("sync_log").insert({ status: "error", error: msg }).catch(() => {});
+    try { await supabaseAdmin.from("sync_log").insert({ status: "error", error: msg }); } catch { /* ignore */ }
     return NextResponse.json({ success: false, error: msg }, { status: 500 });
   }
 }
