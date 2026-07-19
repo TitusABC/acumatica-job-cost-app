@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { getUserFromCookies } from "@/lib/auth";
+import { getUser } from "@/lib/auth";
 import { getJobsWithCache, JobData } from "@/lib/acumatica";
 
 const anthropic = new Anthropic({
@@ -62,7 +62,7 @@ ${JSON.stringify(summary, null, 2)}`;
 }
 
 export async function POST(request: NextRequest) {
-  const user = await getUserFromCookies();
+  const user = await getUser(request);
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
