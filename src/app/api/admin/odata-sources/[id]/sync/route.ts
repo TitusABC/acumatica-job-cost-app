@@ -60,12 +60,32 @@ async function fetchAllRows(
       : [];
 
     allRows.push(...rows);
-
     if (rows.length < top) break;
     skip += top;
   }
 
   return allRows;
+}
+
+async function syncEntity(
+  tableName: string,
+  rows: Record<string, unknown>[]
+): Promise<void> {
+  // Create table if not exists
+  await supabaseAdmin.rpc("run_sql", {
+    query: `CREATE TABLE IF NOT EXISTS ${tableName} (id SERIAL PRIMARY KEY, data JSONB NOT NULL, synced_at TIMESTAMPTZ DEFAULT NOW())`,
+  });
+
+  // Clear existing rows
+  await supabaseAdmin.rpc("run_sql", { query: `DELETE FROM ${tableName}` });
+
+  if (rows.length === 0) return;
+
+  // Insert all rows via json_array_elements to avoid param limits
+  const jsonArray = JSON.stringify(rows);
+  await supabaseAdmin.rpc("run_sql", {
+    query: `INSERT INTO ${tableName} (data, synced_at) SELECT value, NOW() FROM json_array_elements('${jsonArray.replace(/'/g, "''")}'::json)`,
+  });
 }
 
 export async function POST(
@@ -105,7 +125,7 @@ export async function POST(
   }
 
   if (!entities || entities.length === 0) {
-    return NextResponse.json({ message: "No entities selected for this source", synced: [] });
+    return NextResponse.json({ message: "No entities selected", synced: [] });
   }
 
   let sessionCookie = "";
@@ -113,79 +133,36 @@ export async function POST(
     sessionCookie = await authenticateSource(source);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: `Authentication failed: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `Auth failed: ${msg}` }, { status: 502 });
   }
 
   const results: { entity: string; rows: number; error?: string }[] = [];
 
   for (const entity of entities) {
     const tableName = `odata_${entity.table_name}`;
-
     try {
-      // Create table if not exists via run_sql function
-      const createSQL = `
-        CREATE TABLE IF NOT EXISTS ${tableName} (
-          id SERIAL PRIMARY KEY,
-          data JSONB NOT NULL,
-          synced_at TIMESTAMPTZ DEFAULT NOW()
-        )
-      `;
+      const rows = await fetchAllRows(source.odata_base_url, entity.entity_name, sessionCookie);
+      await syncEntity(tableName, rows);
 
-      await supabaseAdmin.rpc("run_sql", { query: createSQL });
-
-      // Fetch all rows
-      const rows = await fetchAllRows(
-        source.odata_base_url,
-        entity.entity_name,
-        sessionCookie
-      );
-
-      // Clear existing rows
-      await supabaseAdmin.rpc("run_sql", {
-        query: `DELETE FROM ${tableName}`,
-      });
-
-      // Insert new rows in batches of 100
-      const batchSize = 100;
-      for (let i = 0; i < rows.length; i += batchSize) {
-        const batch = rows.slice(i, i + batchSize);
-        const insertSQL = `
-          INSERT INTO ${tableName} (data, synced_at)
-          VALUES ${batch
-            .map((_, j) => `(${j + 1 + 1}::jsonb, NOW())`)
-            .join(",")}
-        `;
-        // Use supabase insert for batch
-        await supabaseAdmin.from(tableName).insert(
-          batch.map((row) => ({ data: row, synced_at: new Date().toISOString() }))
-        );
-      }
-
-      // Update entity metadata
       await supabaseAdmin
         .from("odata_entities")
-        .update({
-          last_synced_at: new Date().toISOString(),
-          last_row_count: rows.length,
-          last_error: null,
-        })
+        .update({ last_synced_at: new Date().toISOString(), last_row_count: rows.length, last_error: null })
         .eq("id", entity.id);
 
       results.push({ entity: entity.entity_name, rows: rows.length });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-
       await supabaseAdmin
         .from("odata_entities")
         .update({ last_error: msg })
         .eq("id", entity.id);
-
       results.push({ entity: entity.entity_name, rows: 0, error: msg });
     }
   }
 
   const total = results.reduce((s, r) => s + r.rows, 0);
-  const message = `Synced ${results.length} entities, ${total} total rows`;
-
-  return NextResponse.json({ message, synced: results });
+  return NextResponse.json({
+    message: `Synced ${results.length} entities, ${total} total rows`,
+    synced: results,
+  });
 }
