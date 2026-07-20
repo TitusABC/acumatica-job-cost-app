@@ -2,43 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getUser } from "@/lib/auth";
 
-async function authenticateSource(source: {
-  auth_base_url?: string;
-  username?: string;
-  password?: string;
-  company?: string;
-}): Promise<string> {
-  if (!source.auth_base_url) return "";
-
-  const loginResp = await fetch(`${source.auth_base_url}/entity/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: source.username,
-      password: source.password,
-      company: source.company,
-    }),
-  });
-
-  if (!loginResp.ok) {
-    throw new Error(`Auth failed: ${loginResp.status}`);
-  }
-
-  const setCookie = loginResp.headers.get("set-cookie") || "";
-  return setCookie
-    .split(",")
-    .map((c) => c.trim().split(";")[0])
-    .filter(Boolean)
-    .join("; ");
-}
-
 async function fetchAllRows(
   baseUrl: string,
   entityName: string,
-  sessionCookie: string
+  basicAuth: string
 ): Promise<Record<string, unknown>[]> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (sessionCookie) headers["Cookie"] = sessionCookie;
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    Authorization: `Basic ${basicAuth}`,
+  };
 
   const allRows: Record<string, unknown>[] = [];
   let skip = 0;
@@ -115,6 +87,15 @@ export async function POST(
     return NextResponse.json({ error: "Source not found" }, { status: 404 });
   }
 
+  if (!source.username || !source.password) {
+    return NextResponse.json(
+      { error: "Source is missing username or password for Basic Auth" },
+      { status: 400 }
+    );
+  }
+
+  const basicAuth = Buffer.from(`${source.username}:${source.password}`).toString("base64");
+
   const { data: entities, error: entErr } = await supabaseAdmin
     .from("odata_entities")
     .select("*")
@@ -128,25 +109,21 @@ export async function POST(
     return NextResponse.json({ message: "No entities selected", synced: [] });
   }
 
-  let sessionCookie = "";
-  try {
-    sessionCookie = await authenticateSource(source);
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: `Auth failed: ${msg}` }, { status: 502 });
-  }
-
   const results: { entity: string; rows: number; error?: string }[] = [];
 
   for (const entity of entities) {
     const tableName = `odata_${entity.table_name}`;
     try {
-      const rows = await fetchAllRows(source.odata_base_url, entity.entity_name, sessionCookie);
+      const rows = await fetchAllRows(source.odata_base_url, entity.entity_name, basicAuth);
       await syncEntity(tableName, rows);
 
       await supabaseAdmin
         .from("odata_entities")
-        .update({ last_synced_at: new Date().toISOString(), last_row_count: rows.length, last_error: null })
+        .update({
+          last_synced_at: new Date().toISOString(),
+          last_row_count: rows.length,
+          last_error: null,
+        })
         .eq("id", entity.id);
 
       results.push({ entity: entity.entity_name, rows: rows.length });
