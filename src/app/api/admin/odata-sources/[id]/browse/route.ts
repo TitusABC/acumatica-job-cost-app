@@ -57,11 +57,16 @@ export async function POST(
         );
       }
 
-      // Extract session cookie from response headers
-      const setCookie = loginResp.headers.get("set-cookie") || "";
-      sessionCookie = setCookie
-        .split(",")
-        .map((c) => c.split(";")[0])
+      // Extract ALL session cookies from response headers
+      // getSetCookie() returns each Set-Cookie header as a separate entry (Node 19+)
+      // Fall back to splitting the combined get() value for older runtimes
+      const rawCookies: string[] =
+        typeof (loginResp.headers as any).getSetCookie === "function"
+          ? (loginResp.headers as any).getSetCookie()
+          : (loginResp.headers.get("set-cookie") || "").split(/,(?=[^ ])/);
+
+      sessionCookie = rawCookies
+        .map((c: string) => c.split(";")[0].trim())
         .filter(Boolean)
         .join("; ");
     } catch (e: unknown) {
@@ -72,18 +77,21 @@ export async function POST(
 
   // Fetch OData service document, always logout when done
   try {
-    const headers: Record<string, string> = {
+    const fetchHeaders: Record<string, string> = {
       Accept: "application/json",
     };
     if (sessionCookie) {
-      headers["Cookie"] = sessionCookie;
+      fetchHeaders["Cookie"] = sessionCookie;
     }
 
-    const serviceResp = await fetch(source.odata_base_url, { headers });
+    // Encode spaces in the OData URL (e.g. "Test Tenant - Training" -> "Test%20Tenant%20-%20Training")
+    const odataUrl = source.odata_base_url.replace(/ /g, "%20");
+    const serviceResp = await fetch(odataUrl, { headers: fetchHeaders });
 
     if (!serviceResp.ok) {
+      const errBody = await serviceResp.text().catch(() => "");
       return NextResponse.json(
-        { error: `OData service doc failed: ${serviceResp.status}` },
+        { error: `OData service doc failed: ${serviceResp.status} ${errBody.substring(0, 200)}` },
         { status: 502 }
       );
     }
