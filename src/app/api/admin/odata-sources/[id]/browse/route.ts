@@ -35,6 +35,7 @@ export async function POST(
   }
 
   let sessionCookie = "";
+  const debugInfo: Record<string, unknown> = {};
 
   // Authenticate if auth_base_url is provided
   if (source.auth_base_url) {
@@ -49,6 +50,8 @@ export async function POST(
         }),
       });
 
+      debugInfo.loginStatus = loginResp.status;
+
       if (!loginResp.ok) {
         const errText = await loginResp.text();
         return NextResponse.json(
@@ -57,25 +60,29 @@ export async function POST(
         );
       }
 
-      // Extract ALL session cookies from response headers
-      // getSetCookie() returns each Set-Cookie header as a separate entry (Node 19+)
-      // Fall back to splitting the combined get() value for older runtimes
+      // Collect all Set-Cookie headers
       const rawCookies: string[] =
         typeof (loginResp.headers as any).getSetCookie === "function"
           ? (loginResp.headers as any).getSetCookie()
           : (loginResp.headers.get("set-cookie") || "").split(/,(?=[^ ])/);
 
+      debugInfo.rawCookieCount = rawCookies.length;
+      debugInfo.rawCookieKeys = rawCookies.map((c: string) => c.split("=")[0].trim());
+
       sessionCookie = rawCookies
         .map((c: string) => c.split(";")[0].trim())
         .filter(Boolean)
         .join("; ");
+
+      debugInfo.sessionCookieLength = sessionCookie.length;
+      debugInfo.sessionCookiePreview = sessionCookie.substring(0, 80);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       return NextResponse.json({ error: `Auth error: ${msg}` }, { status: 502 });
     }
   }
 
-  // Fetch OData service document, always logout when done
+  // Fetch OData service document
   try {
     const fetchHeaders: Record<string, string> = {
       Accept: "application/json",
@@ -84,22 +91,43 @@ export async function POST(
       fetchHeaders["Cookie"] = sessionCookie;
     }
 
-    // Encode spaces in the OData URL (e.g. "Test Tenant - Training" -> "Test%20Tenant%20-%20Training")
     const odataUrl = source.odata_base_url.replace(/ /g, "%20");
-    const serviceResp = await fetch(odataUrl, { headers: fetchHeaders });
+    debugInfo.odataUrl = odataUrl;
 
-    if (!serviceResp.ok) {
+    const serviceResp = await fetch(odataUrl, {
+      headers: fetchHeaders,
+      redirect: "manual",
+    });
+
+    debugInfo.odataStatus = serviceResp.status;
+    debugInfo.odataLocation = serviceResp.headers.get("location");
+
+    if (!serviceResp.ok && serviceResp.status !== 301 && serviceResp.status !== 302) {
       const errBody = await serviceResp.text().catch(() => "");
       return NextResponse.json(
-        { error: `OData service doc failed: ${serviceResp.status} ${errBody.substring(0, 200)}` },
+        { error: `OData service doc failed: ${serviceResp.status}`, debug: debugInfo, body: errBody.substring(0, 300) },
         { status: 502 }
       );
     }
 
-    const serviceDoc = await serviceResp.json();
+    // If redirect, follow manually with cookie
+    let finalResp = serviceResp;
+    if (serviceResp.status === 301 || serviceResp.status === 302) {
+      const loc = serviceResp.headers.get("location") || "";
+      finalResp = await fetch(loc, { headers: fetchHeaders });
+      debugInfo.redirectStatus = finalResp.status;
+    }
 
-    // Parse entity names from OData service document
-    // Standard OData: { value: [{ name, url, kind }] }
+    if (!finalResp.ok) {
+      const errBody = await finalResp.text().catch(() => "");
+      return NextResponse.json(
+        { error: `OData failed after redirect: ${finalResp.status}`, debug: debugInfo, body: errBody.substring(0, 300) },
+        { status: 502 }
+      );
+    }
+
+    const serviceDoc = await finalResp.json();
+
     const entities: string[] = [];
     if (Array.isArray(serviceDoc.value)) {
       for (const item of serviceDoc.value) {
@@ -111,12 +139,11 @@ export async function POST(
       }
     }
 
-    return NextResponse.json({ entities: entities.sort() });
+    return NextResponse.json({ entities: entities.sort(), debug: debugInfo });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: `Fetch error: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: `Fetch error: ${msg}`, debug: debugInfo }, { status: 502 });
   } finally {
-    // Always log out to free the concurrent session slot in Acumatica
     if (sessionCookie && source.auth_base_url) {
       await logoutAcumatica(source.auth_base_url, sessionCookie);
     }
