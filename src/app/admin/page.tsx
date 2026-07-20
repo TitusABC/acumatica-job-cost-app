@@ -15,16 +15,23 @@ interface CurrentUser {
   role: string;
 }
 
+interface ColumnConfig {
+  field: string;
+  label: string;
+  visible: boolean;
+  type: "string" | "number" | "calculated";
+  formula?: string;
+}
 
-interface ODataSource {
-  id: string;
-  name: string;
-  odata_base_url: string;
-  auth_base_url?: string;
-  username?: string;
-  company?: string;
-  created_at: string;
-  entities: ODataEntity[];
+interface FilterConfig {
+  field: string;
+  operator: "eq" | "gt" | "lt" | "contains" | "not_empty";
+  value: string;
+}
+
+interface TransformConfig {
+  columns: ColumnConfig[];
+  filters: FilterConfig[];
 }
 
 interface ODataEntity {
@@ -36,6 +43,18 @@ interface ODataEntity {
   last_synced_at?: string;
   last_row_count?: number;
   last_error?: string;
+  transform_config?: TransformConfig;
+}
+
+interface ODataSource {
+  id: string;
+  name: string;
+  odata_base_url: string;
+  auth_base_url?: string;
+  username?: string;
+  company?: string;
+  created_at: string;
+  entities: ODataEntity[];
 }
 
 export default function AdminPage() {
@@ -74,6 +93,15 @@ export default function AdminPage() {
   const [entitySel, setEntitySel] = useState<Record<string, Set<string>>>({});
   const [syncingSrc, setSyncingSrc] = useState<Record<string, boolean>>({});
   const [syncSrcMsg, setSyncSrcMsg] = useState<Record<string, string>>({});
+
+  const [configEntity, setConfigEntity] = useState<{ entity: ODataEntity; sourceId: string } | null>(null);
+  const [configColumns, setConfigColumns] = useState<ColumnConfig[]>([]);
+  const [configFilters, setConfigFilters] = useState<FilterConfig[]>([]);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [availableFields, setAvailableFields] = useState<string[]>([]);
+  const [newCalcName, setNewCalcName] = useState("");
+  const [newCalcFormula, setNewCalcFormula] = useState("");
 
   useEffect(() => {
     fetch("/api/auth/me")
@@ -127,9 +155,9 @@ export default function AdminPage() {
   }
 
   async function handleDeleteUser(userId: string, username: string) {
-    if (!confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    if (!confirm("Delete user \"" + username + "\"? This cannot be undone.")) return;
     try {
-      const res = await fetch(`/api/admin/users/${userId}`, { method: "DELETE" });
+      const res = await fetch("/api/admin/users/" + userId, { method: "DELETE" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       await loadUsers();
@@ -149,7 +177,7 @@ export default function AdminPage() {
     try {
       const body: Record<string, string> = { username: editUsername, role: editRole };
       if (editPassword) body.password = editPassword;
-      const res = await fetch(`/api/admin/users/${editingUser.id}`, {
+      const res = await fetch("/api/admin/users/" + editingUser.id, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -236,6 +264,54 @@ export default function AdminPage() {
     await loadSources();
   }
 
+  async function handleOpenConfig(sourceId: string, ent: ODataEntity) {
+    setConfigEntity({ entity: ent, sourceId });
+    setConfigLoading(true);
+    setNewCalcName("");
+    setNewCalcFormula("");
+    try {
+      const res = await fetch("/api/admin/odata-sources/" + sourceId + "/entities/" + ent.id + "/transform");
+      const d = await res.json();
+      const fields: string[] = d.columns || [];
+      setAvailableFields(fields);
+      const existingConfig: TransformConfig = d.entity?.transform_config || { columns: [], filters: [] };
+      if (!existingConfig.columns || existingConfig.columns.length === 0) {
+        setConfigColumns(fields.map((field) => ({ field, label: field, visible: true, type: "string" as const })));
+      } else {
+        setConfigColumns(existingConfig.columns);
+      }
+      setConfigFilters(existingConfig.filters || []);
+    } catch {
+      setConfigColumns([]);
+      setConfigFilters([]);
+    } finally {
+      setConfigLoading(false);
+    }
+  }
+
+  async function handleSaveTransform() {
+    if (!configEntity) return;
+    setConfigSaving(true);
+    try {
+      const transform_config: TransformConfig = { columns: configColumns, filters: configFilters };
+      const res = await fetch(
+        "/api/admin/odata-sources/" + configEntity.sourceId + "/entities/" + configEntity.entity.id + "/transform",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transform_config }),
+        }
+      );
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error);
+      setConfigEntity(null);
+      await loadSources();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setConfigSaving(false);
+    }
+  }
 
   return (
     <div className="flex h-screen bg-gray-100">
@@ -277,8 +353,8 @@ export default function AdminPage() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between flex-shrink-0">
           <div>
-            <h2 className="text-lg font-semibold text-gray-800">User Management</h2>
-            <p className="text-sm text-gray-500">Manage user access and roles</p>
+            <h2 className="text-lg font-semibold text-gray-800">Admin</h2>
+            <p className="text-sm text-gray-500">Manage users and data sources</p>
           </div>
           <button onClick={() => setShowAddForm(!showAddForm)} className="flex items-center gap-2 bg-amber-400 hover:bg-amber-300 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -290,7 +366,6 @@ export default function AdminPage() {
 
         <div className="flex-1 overflow-y-auto p-6">
           {error && <p className="text-red-500 mb-4 text-sm">{error}</p>}
-
 
           {showAddForm && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
@@ -322,8 +397,6 @@ export default function AdminPage() {
             </div>
           )}
 
-          
-          {/* Data Sources */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
               <div>
@@ -339,7 +412,7 @@ export default function AdminPage() {
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">OData Base URL</label><input value={srcODataUrl} onChange={e => setSrcODataUrl(e.target.value)} placeholder="https://..." required className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" /></div>
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">Auth Base URL</label><input value={srcAuthUrl} onChange={e => setSrcAuthUrl(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" /></div>
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">Username</label><input value={srcUser} onChange={e => setSrcUser(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" /></div>
-                  <div><label className="block text-xs font-medium text-gray-600 mb-1">Pw</label><input type="password" value={srcPw} onChange={e => setSrcPw(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" /></div>
+                  <div><label className="block text-xs font-medium text-gray-600 mb-1">Password</label><input type="password" value={srcPw} onChange={e => setSrcPw(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" /></div>
                   <div><label className="block text-xs font-medium text-gray-600 mb-1">Company</label><input value={srcCo} onChange={e => setSrcCo(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" /></div>
                 </div>
                 {addSrcError && <p className="text-red-500 text-sm">{addSrcError}</p>}
@@ -366,15 +439,43 @@ export default function AdminPage() {
                     <div className="mb-3">
                       <p className="text-xs font-medium text-gray-600 mb-2">Select entities to sync:</p>
                       <div className="grid grid-cols-3 gap-1.5 max-h-40 overflow-y-auto p-2 bg-gray-50 rounded-lg">
-                        {browseData[source.id].map(ent => (<label key={ent} className="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" checked={(entitySel[source.id] || new Set()).has(ent)} onChange={e => handleToggleEnt(source.id, ent, e.target.checked)} className="rounded border-gray-300" /><span className="text-gray-700 truncate">{ent}</span></label>))}
+                        {browseData[source.id].map(ent => (
+                          <label key={ent} className="flex items-center gap-1.5 text-xs cursor-pointer">
+                            <input type="checkbox" checked={(entitySel[source.id] || new Set()).has(ent)} onChange={e => handleToggleEnt(source.id, ent, e.target.checked)} className="rounded border-gray-300" />
+                            <span className="text-gray-700 truncate">{ent}</span>
+                          </label>
+                        ))}
                       </div>
                     </div>
                   )}
                   {source.entities.length > 0 && (
                     <div>
                       <p className="text-xs font-medium text-gray-600 mb-2">Synced entities:</p>
-                      <table className="w-full text-xs"><thead><tr className="text-left text-gray-500 border-b border-gray-100"><th className="pb-1 font-medium">Entity</th><th className="pb-1 font-medium">Rows</th><th className="pb-1 font-medium">Last Synced</th><th className="pb-1 font-medium">Status</th></tr></thead>
-                        <tbody>{source.entities.map(ent => (<tr key={ent.id} className="border-b border-gray-50"><td className="py-1 text-gray-800">{ent.display_name || ent.entity_name}</td><td className="py-1 text-gray-600">{ent.last_row_count != null ? ent.last_row_count : "—"}</td><td className="py-1 text-gray-500">{ent.last_synced_at ? new Date(ent.last_synced_at).toLocaleString() : "Never"}</td><td className="py-1">{ent.last_error ? <span className="text-red-500">{ent.last_error.slice(0,40)}</span> : <span className="text-green-500">OK</span>}</td></tr>))}</tbody>
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-gray-500 border-b border-gray-100">
+                            <th className="pb-1 font-medium">Entity</th>
+                            <th className="pb-1 font-medium">Rows</th>
+                            <th className="pb-1 font-medium">Last Synced</th>
+                            <th className="pb-1 font-medium">Status</th>
+                            <th className="pb-1 font-medium">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {source.entities.map(ent => (
+                            <tr key={ent.id} className="border-b border-gray-50">
+                              <td className="py-1.5 text-gray-800">{ent.display_name || ent.entity_name}</td>
+                              <td className="py-1.5 text-gray-600">{ent.last_row_count != null ? ent.last_row_count : "—"}</td>
+                              <td className="py-1.5 text-gray-500">{ent.last_synced_at ? new Date(ent.last_synced_at).toLocaleString() : "Never"}</td>
+                              <td className="py-1.5">{ent.last_error ? <span className="text-red-500">{ent.last_error.slice(0, 40)}</span> : <span className="text-green-500">OK</span>}</td>
+                              <td className="py-1.5">
+                                <button onClick={() => handleOpenConfig(source.id, ent)} className="text-blue-600 hover:text-blue-800 font-medium text-xs underline">
+                                  Configure
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
                       </table>
                     </div>
                   )}
@@ -382,7 +483,8 @@ export default function AdminPage() {
               ))}
             </div>
           </div>
-{editingUser && (
+
+          {editingUser && (
             <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
               <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
                 <h3 className="text-base font-semibold text-gray-800 mb-4">Edit User: {editingUser.username}</h3>
@@ -414,7 +516,154 @@ export default function AdminPage() {
             </div>
           )}
 
+          {configEntity && (
+            <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 overflow-auto">
+              <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-screen overflow-auto">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 sticky top-0 bg-white">
+                  <div>
+                    <h3 className="text-base font-semibold text-gray-800">
+                      Configure: {configEntity.entity.display_name || configEntity.entity.entity_name}
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-0.5">Column visibility, labels, calculated fields, and row filters</p>
+                  </div>
+                  <button onClick={() => setConfigEntity(null)} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">x</button>
+                </div>
+
+                {configLoading ? (
+                  <div className="flex items-center justify-center h-40">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-400" />
+                  </div>
+                ) : (
+                  <div className="p-6 space-y-6">
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-700 mb-3">Column Configuration</h4>
+                      <div className="border border-gray-200 rounded-lg overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-medium text-gray-600 w-14">Show</th>
+                              <th className="px-3 py-2 text-left font-medium text-gray-600">Field / Formula</th>
+                              <th className="px-3 py-2 text-left font-medium text-gray-600">Display Label</th>
+                              <th className="px-3 py-2 text-left font-medium text-gray-600 w-28">Type</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100">
+                            {configColumns.map((col, idx) => (
+                              <tr key={idx} className={col.visible ? "" : "opacity-50"}>
+                                <td className="px-3 py-1.5 text-center">
+                                  <input type="checkbox" checked={col.visible} onChange={e => {
+                                    const next = [...configColumns];
+                                    next[idx] = { ...next[idx], visible: e.target.checked };
+                                    setConfigColumns(next);
+                                  }} className="rounded border-gray-300" />
+                                </td>
+                                <td className="px-3 py-1.5">
+                                  {col.type === "calculated" ? (
+                                    <input type="text" value={col.formula || ""} onChange={e => {
+                                      const next = [...configColumns];
+                                      next[idx] = { ...next[idx], formula: e.target.value };
+                                      setConfigColumns(next);
+                                    }} className="border border-gray-300 rounded px-2 py-1 w-full text-xs font-mono" placeholder="e.g. ActualLabor + ActualSubs" />
+                                  ) : (
+                                    <span className="font-mono text-gray-600">{col.field}</span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-1.5">
+                                  <input type="text" value={col.label} onChange={e => {
+                                    const next = [...configColumns];
+                                    next[idx] = { ...next[idx], label: e.target.value };
+                                    setConfigColumns(next);
+                                  }} className="border border-gray-300 rounded px-2 py-1 w-full text-xs" />
+                                </td>
+                                <td className="px-3 py-1.5">
+                                  <div className="flex items-center gap-1">
+                                    <span className={"inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium " + (col.type === "calculated" ? "bg-purple-100 text-purple-700" : "bg-gray-100 text-gray-600")}>
+                                      {col.type}
+                                    </span>
+                                    {col.type === "calculated" && (
+                                      <button onClick={() => setConfigColumns(configColumns.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 font-bold ml-1">x</button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="mt-3 p-3 bg-purple-50 rounded-lg border border-purple-100">
+                        <p className="text-xs font-semibold text-purple-700 mb-2">Add Calculated Column</p>
+                        <div className="flex gap-2">
+                          <input type="text" value={newCalcName} onChange={e => setNewCalcName(e.target.value)} placeholder="Name (e.g. Total Cost)" className="border border-gray-300 rounded px-2 py-1 text-xs w-40" />
+                          <input type="text" value={newCalcFormula} onChange={e => setNewCalcFormula(e.target.value)} placeholder="Formula (e.g. ActualLabor + ActualSubs + ActualMaterials)" className="border border-gray-300 rounded px-2 py-1 text-xs flex-1 font-mono" />
+                          <button onClick={() => {
+                            if (!newCalcName.trim()) return;
+                            const field = newCalcName.trim().replace(/\s+/g, "");
+                            setConfigColumns([...configColumns, { field, label: newCalcName.trim(), visible: true, type: "calculated", formula: newCalcFormula.trim() }]);
+                            setNewCalcName("");
+                            setNewCalcFormula("");
+                          }} className="bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded px-3 py-1 text-xs whitespace-nowrap">+ Add</button>
+                        </div>
+                        <p className="text-xs text-purple-500 mt-1.5">Use field names from above. Example: ActualRevenue - ActualLabor - ActualSubs - ActualMaterials - ActualDisposal - ActualOther</p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-700 mb-3">Row Filters <span className="text-xs font-normal text-gray-400">(combined with AND)</span></h4>
+                      <div className="space-y-2">
+                        {configFilters.map((filter, idx) => (
+                          <div key={idx} className="flex gap-2 items-center">
+                            <select value={filter.field} onChange={e => {
+                              const next = [...configFilters];
+                              next[idx] = { ...next[idx], field: e.target.value };
+                              setConfigFilters(next);
+                            }} className="border border-gray-300 rounded px-2 py-1 text-xs">
+                              {availableFields.map(f => <option key={f} value={f}>{f}</option>)}
+                              {configColumns.filter(c => c.type === "calculated").map(c => (
+                                <option key={c.field} value={c.field}>{c.label} (calc)</option>
+                              ))}
+                            </select>
+                            <select value={filter.operator} onChange={e => {
+                              const next = [...configFilters];
+                              next[idx] = { ...next[idx], operator: e.target.value as FilterConfig["operator"] };
+                              setConfigFilters(next);
+                            }} className="border border-gray-300 rounded px-2 py-1 text-xs">
+                              <option value="eq">equals</option>
+                              <option value="gt">greater than</option>
+                              <option value="lt">less than</option>
+                              <option value="contains">contains</option>
+                              <option value="not_empty">not empty</option>
+                            </select>
+                            {filter.operator !== "not_empty" && (
+                              <input type="text" value={filter.value} onChange={e => {
+                                const next = [...configFilters];
+                                next[idx] = { ...next[idx], value: e.target.value };
+                                setConfigFilters(next);
+                              }} placeholder="Value" className="border border-gray-300 rounded px-2 py-1 text-xs flex-1" />
+                            )}
+                            <button onClick={() => setConfigFilters(configFilters.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 font-bold">x</button>
+                          </div>
+                        ))}
+                        <button onClick={() => setConfigFilters([...configFilters, { field: availableFields[0] || "", operator: "gt", value: "0" }])} className="text-xs text-blue-600 hover:text-blue-700 font-medium">+ Add Filter</button>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-3 pt-2 border-t border-gray-200">
+                      <button onClick={handleSaveTransform} disabled={configSaving} className="bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition">
+                        {configSaving ? "Saving..." : "Save Configuration"}
+                      </button>
+                      <button onClick={() => setConfigEntity(null)} className="bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg px-4 py-2 text-sm transition">Cancel</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-base font-semibold text-gray-800">Users</h3>
+            </div>
             {loading ? (
               <div className="flex items-center justify-center h-40">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-400" />
@@ -437,7 +686,7 @@ export default function AdminPage() {
                       <tr key={u.id} className="hover:bg-gray-50 transition">
                         <td className="px-6 py-4 font-medium text-gray-800">{u.username}</td>
                         <td className="px-6 py-4">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${u.role === "admin" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-600"}`}>
+                          <span className={"inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium " + (u.role === "admin" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-600")}>
                             {u.role}
                           </span>
                         </td>
