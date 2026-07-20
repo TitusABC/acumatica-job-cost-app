@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getUserFromCookies } from "@/lib/auth";
+import { getUser } from "@/lib/auth";
 
 async function authenticateSource(source: {
   auth_base_url?: string;
@@ -97,7 +97,7 @@ export async function POST(
   const isCron = cronSecret && reqSecret === cronSecret;
 
   if (!isCron) {
-    const user = await getUserFromCookies(req);
+    const user = await getUser(req);
     if (!user || user.role !== "admin") {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
