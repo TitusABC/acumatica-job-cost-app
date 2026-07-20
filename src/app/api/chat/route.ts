@@ -5,132 +5,77 @@ import { supabaseAdmin } from "@/lib/supabase";
 
 interface JobData {
   jobId: string;
-  description: string;
-  task: string;
-  customer?: string;
-  status?: string;
-  budgetedRevenue: number;
-  actualRevenue: number;
-  budgetedLabor: number;
-  actualLabor: number;
-  budgetedMaterials: number;
-  actualMaterials: number;
-  budgetedSubs: number;
-  actualSubs: number;
-  budgetedDisposal: number;
-  actualDisposal: number;
-  budgetedOther: number;
-  actualOther: number;
-  totalBudgetedCost: number;
-  totalActualCost: number;
+  jobName: string;
+  tradeType: string;
+  branch: string;
+  revenue: number;
+  cost: number;
   profit: number;
   marginPercent: number;
+  budgetedRevenue: number;
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
-function formatJobDataForPrompt(jobs: JobData[], isDemo: boolean): string {
-  const demoNote = isDemo ? "NOTE: This is demo/sample data.\n\n" : "";
-  
+function aggregateODataRows(rows: Record<string, unknown>[]): JobData[] {
+  const jobMap = new Map<string, JobData>();
+  for (const row of rows) {
+    const jobId = String(row.JobID || row.ProjectID || "Unknown");
+    const tradeType = String(row.Task || "Unknown");
+    const branch = String(row.Branch || "");
+    const actualRevenue = Number(row.ActualRevenue) || 0;
+    const actualCost = (Number(row.ActualSubs) || 0) + (Number(row.ActualMaterials) || 0) + (Number(row.ActualDisposal) || 0) + (Number(row.ActualLabor) || 0);
+    const budgetedRevenue = Number(row.BudgetedRevenue) || 0;
+    if (jobMap.has(jobId)) {
+      const j = jobMap.get(jobId)!;
+      j.revenue += actualRevenue;
+      j.cost += actualCost;
+      j.profit = j.revenue - j.cost;
+      j.marginPercent = j.revenue > 0 ? (j.profit / j.revenue) * 100 : 0;
+      j.budgetedRevenue += budgetedRevenue;
+    } else {
+      const profit = actualRevenue - actualCost;
+      jobMap.set(jobId, { jobId, jobName: jobId, tradeType, branch, revenue: actualRevenue, cost: actualCost, profit, marginPercent: actualRevenue > 0 ? (profit / actualRevenue) * 100 : 0, budgetedRevenue });
+    }
+  }
+  return Array.from(jobMap.values());
+}
+
+function formatJobDataForPrompt(jobs: JobData[]): string {
+  const summary = jobs.map(j => ({ jobId: j.jobId, tradeType: j.tradeType, branch: j.branch, revenue: j.revenue, cost: j.cost, profit: j.profit, marginPercent: Number(j.marginPercent.toFixed(1)), budgetedRevenue: j.budgetedRevenue }));
+  const byTrade: Record<string, { revenue: number; cost: number; count: number }> = {};
   let totalRevenue = 0, totalCost = 0;
-  let totalBudgetedRevenue = 0, totalBudgetedCost = 0;
   for (const j of jobs) {
-    totalRevenue += j.actualRevenue;
-    totalCost += j.totalActualCost;
-    totalBudgetedRevenue += j.budgetedRevenue;
-    totalBudgetedCost += j.totalBudgetedCost;
+    if (!byTrade[j.tradeType]) byTrade[j.tradeType] = { revenue: 0, cost: 0, count: 0 };
+    byTrade[j.tradeType].revenue += j.revenue;
+    byTrade[j.tradeType].cost += j.cost;
+    byTrade[j.tradeType].count++;
+    totalRevenue += j.revenue;
+    totalCost += j.cost;
   }
   const totalProfit = totalRevenue - totalCost;
   const overallMargin = totalRevenue > 0 ? (((totalRevenue - totalCost) / totalRevenue) * 100).toFixed(1) : "0";
-
-  // Group by jobId for job-level summary
-  const byJob: Record<string, {
-    description: string; tasks: string[]; actualRevenue: number; totalActualCost: number;
-    actualLabor: number; actualMaterials: number; actualSubs: number; actualDisposal: number; actualOther: number;
-    budgetedRevenue: number; totalBudgetedCost: number;
-  }> = {};
-  for (const j of jobs) {
-    if (!byJob[j.jobId]) {
-      byJob[j.jobId] = {
-        description: j.description, tasks: [], actualRevenue: 0, totalActualCost: 0,
-        actualLabor: 0, actualMaterials: 0, actualSubs: 0, actualDisposal: 0, actualOther: 0,
-        budgetedRevenue: 0, totalBudgetedCost: 0
-      };
-    }
-    const entry = byJob[j.jobId];
-    if (j.task && !entry.tasks.includes(j.task)) entry.tasks.push(j.task);
-    entry.actualRevenue += j.actualRevenue;
-    entry.totalActualCost += j.totalActualCost;
-    entry.actualLabor += j.actualLabor;
-    entry.actualMaterials += j.actualMaterials;
-    entry.actualSubs += j.actualSubs;
-    entry.actualDisposal += j.actualDisposal;
-    entry.actualOther += j.actualOther;
-    entry.budgetedRevenue += j.budgetedRevenue;
-    entry.totalBudgetedCost += j.totalBudgetedCost;
-  }
-
-  const jobSummary = Object.entries(byJob)
-    .map(([jobId, j]) => {
-      const profit = j.actualRevenue - j.totalActualCost;
-      const margin = j.actualRevenue > 0 ? ((profit / j.actualRevenue) * 100).toFixed(1) : "0";
-      const revenueVariance = j.actualRevenue - j.budgetedRevenue;
-      const costVariance = j.totalActualCost - j.totalBudgetedCost;
-      return { jobId, description: j.description, tasks: j.tasks.join(", "), actualRevenue: j.actualRevenue, totalActualCost: j.totalActualCost, profit, margin: margin + "%", actualLabor: j.actualLabor, actualMaterials: j.actualMaterials, actualSubs: j.actualSubs, actualDisposal: j.actualDisposal, actualOther: j.actualOther, budgetedRevenue: j.budgetedRevenue, totalBudgetedCost: j.totalBudgetedCost, revenueVariance, costVariance };
-    })
-    .sort((a, b) => b.actualRevenue - a.actualRevenue);
-
-  return `${demoNote}JOB COST DATA SUMMARY (from Acumatica GI640593):
-Total Job+Task Rows: ${jobs.length}
-Total Unique Jobs: ${Object.keys(byJob).length}
-Total Actual Revenue: $${totalRevenue.toLocaleString()}
-Total Actual Cost: $${totalCost.toLocaleString()}
-Total Actual Profit: $${totalProfit.toLocaleString()}
-Overall Margin: ${overallMargin}%
-Total Budgeted Revenue: $${totalBudgetedRevenue.toLocaleString()}
-Total Budgeted Cost: $${totalBudgetedCost.toLocaleString()}
-
-DATA STRUCTURE:
-Each row represents one Job+Task combination with budget/actual breakdowns by cost category:
-- Revenue: contract revenue
-- Labor: direct labor costs
-- Materials: material costs
-- Subs: subcontractor costs
-- Disposal: disposal/waste costs
-- Other: miscellaneous costs
-
-JOB-LEVEL SUMMARY (JSON):
-${JSON.stringify(jobSummary, null, 2)}`;
+  const tradeBreakdown = Object.entries(byTrade).map(([trade, stats]) => ({ trade, jobCount: stats.count, totalRevenue: stats.revenue, totalCost: stats.cost, totalProfit: stats.revenue - stats.cost, margin: stats.revenue > 0 ? (((stats.revenue - stats.cost) / stats.revenue) * 100).toFixed(1) : "0" })).sort((a, b) => b.totalRevenue - a.totalRevenue);
+  return `JOB COST DATA SUMMARY:\nTotal Jobs: ${jobs.length}\nTotal Revenue: $${totalRevenue.toLocaleString()}\nTotal Cost: $${totalCost.toLocaleString()}\nTotal Profit: $${totalProfit.toLocaleString()}\nOverall Margin: ${overallMargin}%\n\nBY TASK TYPE:\n${tradeBreakdown.map(t => `  ${t.trade}: ${t.jobCount} jobs, Revenue $${t.totalRevenue.toLocaleString()}, Profit $${t.totalProfit.toLocaleString()}, Margin ${t.margin}%`).join("\n")}\n\nINDIVIDUAL JOB DATA (JSON):\n${JSON.stringify(summary, null, 2)}`;
 }
 
 export async function POST(request: NextRequest) {
   const user = await getUser(request);
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
   try {
     const { message, history } = await request.json();
     if (!message?.trim()) return NextResponse.json({ error: "Message is required" }, { status: 400 });
 
-    const { data: rows, error: dbError } = await supabaseAdmin.from("job_data").select("data");
+    const { data: rows, error: dbError } = await supabaseAdmin.from("odata_tw___job_cost").select("data");
     if (dbError || !rows || rows.length === 0) {
-      return NextResponse.json({ response: "Job data has not been synced yet. Please ask an admin to click \"Refresh Data Now\" in the Admin panel to load data from Acumatica." });
+      return NextResponse.json({ response: "Job cost data has not been synced yet. Please ask an admin to sync the OData source in the Admin panel." });
     }
 
-    const jobs = rows.map((r) => r.data as JobData);
-    const jobDataText = formatJobDataForPrompt(jobs, false);
+    const odataRows = rows.map(r => r.data as Record<string, unknown>);
+    const jobs = aggregateODataRows(odataRows);
+    const jobDataText = formatJobDataForPrompt(jobs);
 
-    const systemPrompt = `You are a job cost analyst assistant for Allen Bontrager Carpentry, a residential exterior contractor. You have access to job cost data from Acumatica ERP (GI640593).
-
-${jobDataText}
-
-Your role:
-- Answer questions about job margins, profitability, budget vs actual variances, cost category breakdowns, top/bottom performers, etc.
-- Be concise and specific. Use dollar amounts and percentages when relevant.
-- Format numbers clearly (e.g., $12,500 not 12500, 28.5% not 0.285).
-- When listing multiple items, use bullet points or numbered lists.
-- Cost categories: Labor, Materials, Subs (subcontractors), Disposal, Other.
-- Profit = Actual Revenue - Total Actual Cost (Labor + Materials + Subs + Disposal + Other).
-- Budget variance: positive means over budget (bad for costs, good for revenue).`;
+    const systemPrompt = `You are a job cost analyst assistant for Allen Bontrager Carpentry, a residential exterior contractor. You have access to job profitability data from Acumatica ERP via OData sync.\n\n${jobDataText}\n\nYour role:\n- Answer questions about job margins, profitability by task type, top/bottom performers, cost trends, budget vs actuals, etc.\n- Be concise and specific. Use dollar amounts and percentages when relevant.\n- Format numbers clearly (e.g., $12,500 not 12500, 28.5% not 0.285).\n- When listing multiple items, use bullet points or numbered lists.\n- If asked something outside the data scope, say so clearly.\n- Data is aggregated by Job ID from Acumatica's TW - Job Cost entity.`;
 
     const messages: Anthropic.MessageParam[] = [
       ...(history || []).map((m: { role: string; content: string }) => ({ role: m.role as "user" | "assistant", content: m.content })),
