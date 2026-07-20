@@ -15,11 +15,6 @@ interface CurrentUser {
   role: string;
 }
 
-interface SyncInfo {
-  synced_at: string;
-  row_count: number;
-  status: string;
-}
 
 interface ODataSource {
   id: string;
@@ -64,10 +59,6 @@ export default function AdminPage() {
   const [editError, setEditError] = useState("");
   const [editLoading, setEditLoading] = useState(false);
 
-  const [syncInfo, setSyncInfo] = useState<SyncInfo | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [syncResult, setSyncResult] = useState("");
-  const [syncError, setSyncError] = useState("");
   const [sources, setSources] = useState<ODataSource[]>([]);
   const [showAddSrcForm, setShowAddSrcForm] = useState(false);
   const [srcName, setSrcName] = useState("");
@@ -92,7 +83,6 @@ export default function AdminPage() {
         else router.push("/");
       });
     loadUsers();
-    loadSyncInfo();
     loadSources();
   }, []);
 
@@ -107,35 +97,6 @@ export default function AdminPage() {
       setError(err instanceof Error ? err.message : "Failed to load users");
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function loadSyncInfo() {
-    try {
-      const res = await fetch("/api/admin/sync-info");
-      if (res.ok) {
-        const data = await res.json();
-        if (data.syncInfo) setSyncInfo(data.syncInfo);
-      }
-    } catch {
-      // ignore â sync info is optional
-    }
-  }
-
-  async function handleSync() {
-    setSyncing(true);
-    setSyncResult("");
-    setSyncError("");
-    try {
-      const res = await fetch("/api/admin/sync-data", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Sync failed");
-      setSyncResult(`Sync complete â ${data.rowCount} jobs loaded.`);
-      await loadSyncInfo();
-    } catch (err) {
-      setSyncError(err instanceof Error ? err.message : "Sync failed");
-    } finally {
-      setSyncing(false);
     }
   }
 
@@ -330,25 +291,6 @@ export default function AdminPage() {
         <div className="flex-1 overflow-y-auto p-6">
           {error && <p className="text-red-500 mb-4 text-sm">{error}</p>}
 
-          {/* Data Sync Section */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 mb-6">
-            <h3 className="text-base font-semibold text-gray-800 mb-1">Data Sync</h3>
-            {syncInfo && (
-              <p className="text-sm text-gray-500 mb-3">
-                Last sync: {new Date(syncInfo.synced_at).toLocaleString()} â {syncInfo.row_count} jobs ({syncInfo.status})
-              </p>
-            )}
-            {!syncInfo && <p className="text-sm text-gray-400 mb-3">No sync recorded yet.</p>}
-            <button
-              onClick={handleSync}
-              disabled={syncing}
-              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold rounded-lg px-4 py-2 text-sm transition"
-            >
-              {syncing ? "Syncing..." : "Refresh Data Now"}
-            </button>
-            {syncResult && <p className="mt-2 text-sm text-green-600">{syncResult}</p>}
-            {syncError && <p className="mt-2 text-sm text-red-600">{syncError}</p>}
-          </div>
 
           {showAddForm && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
