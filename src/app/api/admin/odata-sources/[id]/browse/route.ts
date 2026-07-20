@@ -2,6 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getUser } from "@/lib/auth";
 
+async function logoutAcumatica(authBaseUrl: string, sessionCookie: string) {
+  try {
+    await fetch(`${authBaseUrl}/entity/auth/logout`, {
+      method: "POST",
+      headers: { Cookie: sessionCookie },
+    });
+  } catch {
+    // ignore logout errors
+  }
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -50,7 +61,7 @@ export async function POST(
       const setCookie = loginResp.headers.get("set-cookie") || "";
       sessionCookie = setCookie
         .split(",")
-        .map((c) => c.trim().split(";")[0])
+        .map((c) => c.split(";")[0])
         .filter(Boolean)
         .join("; ");
     } catch (e: unknown) {
@@ -59,7 +70,7 @@ export async function POST(
     }
   }
 
-  // Fetch OData service document
+  // Fetch OData service document, always logout when done
   try {
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -68,7 +79,7 @@ export async function POST(
       headers["Cookie"] = sessionCookie;
     }
 
-    const serviceResp = await fetch(`${source.odata_base_url}/`, { headers });
+    const serviceResp = await fetch(source.odata_base_url, { headers });
 
     if (!serviceResp.ok) {
       return NextResponse.json(
@@ -84,7 +95,7 @@ export async function POST(
     const entities: string[] = [];
     if (Array.isArray(serviceDoc.value)) {
       for (const item of serviceDoc.value) {
-        if (item.name && item.kind === "EntitySet") {
+        if (item.kind === "EntitySet") {
           entities.push(item.name);
         } else if (item.name) {
           entities.push(item.name);
@@ -96,5 +107,10 @@ export async function POST(
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ error: `Fetch error: ${msg}` }, { status: 502 });
+  } finally {
+    // Always log out to free the concurrent session slot in Acumatica
+    if (sessionCookie && source.auth_base_url) {
+      await logoutAcumatica(source.auth_base_url, sessionCookie);
+    }
   }
 }
