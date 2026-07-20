@@ -2,17 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getUser } from "@/lib/auth";
 
-async function logoutAcumatica(authBaseUrl: string, sessionCookie: string) {
-  try {
-    await fetch(`${authBaseUrl}/entity/auth/logout`, {
-      method: "POST",
-      headers: { Cookie: sessionCookie },
-    });
-  } catch {
-    // ignore logout errors
-  }
-}
-
 export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -34,11 +23,28 @@ export async function POST(
     return NextResponse.json({ error: "Source not found" }, { status: 404 });
   }
 
-  let sessionCookie = "";
-  const debugInfo: Record<string, unknown> = {};
+  // Encode spaces in the OData URL and ensure trailing slash for service document
+  const rawUrl = source.odata_base_url.replace(/ /g, "%20");
+  const odataUrl = rawUrl.endsWith("/") ? rawUrl : rawUrl + "/";
 
-  // Authenticate if auth_base_url is provided
+  // Try multiple auth strategies in order
+  const strategies: Array<{ name: string; headers: Record<string, string> }> = [];
+
+  // Strategy 1: Basic Auth (most reliable for Acumatica OData)
+  if (source.username && source.password) {
+    const basicCreds = Buffer.from(`${source.username}:${source.password}`).toString("base64");
+    strategies.push({
+      name: "basic",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Basic ${basicCreds}`,
+      },
+    });
+  }
+
+  // Strategy 2: Cookie-based (login first, then use session cookie)
   if (source.auth_base_url) {
+    let sessionCookie = "";
     try {
       const loginResp = await fetch(`${source.auth_base_url}/entity/auth/login`, {
         method: "POST",
@@ -50,102 +56,84 @@ export async function POST(
         }),
       });
 
-      debugInfo.loginStatus = loginResp.status;
+      if (loginResp.ok) {
+        const rawCookies: string[] =
+          typeof (loginResp.headers as any).getSetCookie === "function"
+            ? (loginResp.headers as any).getSetCookie()
+            : (loginResp.headers.get("set-cookie") || "").split(/,(?=[^ ])/);
 
-      if (!loginResp.ok) {
-        const errText = await loginResp.text();
-        return NextResponse.json(
-          { error: `Auth failed: ${loginResp.status} ${errText.substring(0, 200)}` },
-          { status: 502 }
-        );
+        sessionCookie = rawCookies
+          .map((c: string) => c.split(";")[0].trim())
+          .filter(Boolean)
+          .join("; ");
       }
-
-      // Collect all Set-Cookie headers
-      const rawCookies: string[] =
-        typeof (loginResp.headers as any).getSetCookie === "function"
-          ? (loginResp.headers as any).getSetCookie()
-          : (loginResp.headers.get("set-cookie") || "").split(/,(?=[^ ])/);
-
-      debugInfo.rawCookieCount = rawCookies.length;
-      debugInfo.rawCookieKeys = rawCookies.map((c: string) => c.split("=")[0].trim());
-
-      sessionCookie = rawCookies
-        .map((c: string) => c.split(";")[0].trim())
-        .filter(Boolean)
-        .join("; ");
-
-      debugInfo.sessionCookieLength = sessionCookie.length;
-      debugInfo.sessionCookiePreview = sessionCookie.substring(0, 80);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return NextResponse.json({ error: `Auth error: ${msg}` }, { status: 502 });
+    } catch {
+      // ignore login errors for this strategy
     }
-  }
 
-  // Fetch OData service document
-  try {
-    const fetchHeaders: Record<string, string> = {
-      Accept: "application/json",
-    };
     if (sessionCookie) {
-      fetchHeaders["Cookie"] = sessionCookie;
-    }
+      strategies.push({
+        name: "cookie",
+        headers: { Accept: "application/json", Cookie: sessionCookie },
+      });
 
-    const odataUrl = source.odata_base_url.replace(/ /g, "%20");
-    debugInfo.odataUrl = odataUrl;
-
-    const serviceResp = await fetch(odataUrl, {
-      headers: fetchHeaders,
-      redirect: "manual",
-    });
-
-    debugInfo.odataStatus = serviceResp.status;
-    debugInfo.odataLocation = serviceResp.headers.get("location");
-
-    if (!serviceResp.ok && serviceResp.status !== 301 && serviceResp.status !== 302) {
-      const errBody = await serviceResp.text().catch(() => "");
-      return NextResponse.json(
-        { error: `OData service doc failed: ${serviceResp.status}`, debug: debugInfo, body: errBody.substring(0, 300) },
-        { status: 502 }
-      );
-    }
-
-    // If redirect, follow manually with cookie
-    let finalResp = serviceResp;
-    if (serviceResp.status === 301 || serviceResp.status === 302) {
-      const loc = serviceResp.headers.get("location") || "";
-      finalResp = await fetch(loc, { headers: fetchHeaders });
-      debugInfo.redirectStatus = finalResp.status;
-    }
-
-    if (!finalResp.ok) {
-      const errBody = await finalResp.text().catch(() => "");
-      return NextResponse.json(
-        { error: `OData failed after redirect: ${finalResp.status}`, debug: debugInfo, body: errBody.substring(0, 300) },
-        { status: 502 }
-      );
-    }
-
-    const serviceDoc = await finalResp.json();
-
-    const entities: string[] = [];
-    if (Array.isArray(serviceDoc.value)) {
-      for (const item of serviceDoc.value) {
-        if (item.kind === "EntitySet") {
-          entities.push(item.name);
-        } else if (item.name) {
-          entities.push(item.name);
-        }
-      }
-    }
-
-    return NextResponse.json({ entities: entities.sort(), debug: debugInfo });
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: `Fetch error: ${msg}`, debug: debugInfo }, { status: 502 });
-  } finally {
-    if (sessionCookie && source.auth_base_url) {
-      await logoutAcumatica(source.auth_base_url, sessionCookie);
+      // Strategy 3: Cookie + Windows auth header
+      strategies.push({
+        name: "cookie+auth",
+        headers: {
+          Accept: "application/json",
+          Cookie: sessionCookie,
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
     }
   }
+
+  const debugResults: Record<string, number> = {};
+  let lastSessionCookie = "";
+
+  for (const strategy of strategies) {
+    try {
+      const serviceResp = await fetch(odataUrl, { headers: strategy.headers });
+      debugResults[strategy.name] = serviceResp.status;
+
+      if (serviceResp.ok) {
+        // Logout if we used cookie auth
+        if (strategy.name.startsWith("cookie") && strategy.headers.Cookie && source.auth_base_url) {
+          lastSessionCookie = strategy.headers.Cookie;
+          fetch(`${source.auth_base_url}/entity/auth/logout`, {
+            method: "POST",
+            headers: { Cookie: lastSessionCookie },
+          }).catch(() => {});
+        }
+
+        const serviceDoc = await serviceResp.json();
+        const entities: string[] = [];
+        if (Array.isArray(serviceDoc.value)) {
+          for (const item of serviceDoc.value) {
+            if (item.kind === "EntitySet" || item.name) {
+              entities.push(item.name);
+            }
+          }
+        }
+        return NextResponse.json({ entities: entities.sort() });
+      }
+    } catch (e: unknown) {
+      debugResults[strategy.name + "_err"] = -1;
+    }
+  }
+
+  // All strategies failed
+  // Attempt logout if we created a session
+  if (lastSessionCookie && source.auth_base_url) {
+    fetch(`${source.auth_base_url}/entity/auth/logout`, {
+      method: "POST",
+      headers: { Cookie: lastSessionCookie },
+    }).catch(() => {});
+  }
+
+  return NextResponse.json(
+    { error: "All auth strategies failed", debug: debugResults, odataUrl },
+    { status: 502 }
+  );
 }
