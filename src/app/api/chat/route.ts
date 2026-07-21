@@ -68,7 +68,7 @@ function aggregateODataRows(rows: Record<string, unknown>[]): JobData[] {
 }
 
 function formatJobDataForPrompt(jobs: JobData[]): string {
-  const topJobs = [...jobs].sort((a, b) => b.revenue - a.revenue).slice(0, 200);
+  const topJobs = [...jobs].sort((a, b) => b.revenue - a.revenue);
 
   const summary = topJobs.map((j) => ({
     jobId: j.jobId,
@@ -122,7 +122,7 @@ function formatJobDataForPrompt(jobs: JobData[]): string {
 
   const top5Lines = sortedByProfit.slice(0, 5).map((j, i) => {
     const name = j.description || j.tradeType;
-    return "  " + (i + 1) + ". " + j.jobId + " — " + name + ": $" +
+    return "  " + (i + 1) + ". " + j.jobId + " â " + name + ": $" +
       Math.round(j.profit).toLocaleString() + " profit, " +
       j.marginPercent.toFixed(1) + "% margin";
   });
@@ -133,7 +133,7 @@ function formatJobDataForPrompt(jobs: JobData[]): string {
     .reverse()
     .map((j, i) => {
       const name = j.description || j.tradeType;
-      return "  " + (i + 1) + ". " + j.jobId + " — " + name + ": $" +
+      return "  " + (i + 1) + ". " + j.jobId + " â " + name + ": $" +
         Math.round(j.profit).toLocaleString() + " profit, " +
         j.marginPercent.toFixed(1) + "% margin";
     });
@@ -160,7 +160,7 @@ function formatJobDataForPrompt(jobs: JobData[]): string {
     "BOTTOM 5 LEAST PROFITABLE (with revenue > 0):",
     ...bottom5Lines,
     "",
-    "INDIVIDUAL JOB DATA — top " + topJobs.length + " by revenue (JSON):",
+    "INDIVIDUAL JOB DATA â top " + topJobs.length + " by revenue (JSON):",
     JSON.stringify(summary, null, 2),
   ].join("\n");
 }
@@ -174,22 +174,36 @@ export async function POST(request: NextRequest) {
     if (!message?.trim())
       return NextResponse.json({ error: "Message is required" }, { status: 400 });
 
-    const { data: rows, error: dbError } = await supabaseAdmin
-      .from("odata_tw___job_cost")
-      .select("data");
+    const { data: jobSummary, error: dbError } = await supabaseAdmin
+      .rpc('get_job_cost_summary');
 
-    if (dbError || !rows || rows.length === 0) {
+    if (dbError || !jobSummary || jobSummary.length === 0) {
       return NextResponse.json({
         response:
           "Job cost data has not been synced yet. Please ask an admin to sync the OData source in the Admin panel.",
       });
     }
 
-    const odataRows = rows.map((r) => r.data as Record<string, unknown>);
-    const jobs = aggregateODataRows(odataRows);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const jobs = (jobSummary as any[]).map((j) => ({
+      jobId: j.job_id as string,
+      description: (j.description as string) || '',
+      tradeType: (j.branch as string) || '',
+      branch: (j.branch as string) || '',
+      revenue: Number(j.actual_revenue) || 0,
+      cost: (Number(j.actual_labor) + Number(j.actual_subs) + Number(j.actual_materials) + Number(j.actual_disposal) + Number(j.actual_other)) || 0,
+      profit: (Number(j.actual_revenue) - (Number(j.actual_labor) + Number(j.actual_subs) + Number(j.actual_materials) + Number(j.actual_disposal) + Number(j.actual_other))) || 0,
+      marginPercent: Number(j.actual_revenue) > 0
+        ? ((Number(j.actual_revenue) - (Number(j.actual_labor) + Number(j.actual_subs) + Number(j.actual_materials) + Number(j.actual_disposal) + Number(j.actual_other))) / Number(j.actual_revenue) * 100)
+        : 0,
+      budgetedRevenue: Number(j.budgeted_revenue) || 0,
+      startDate: '',
+      endDate: '',
+    }));
     const jobDataText = formatJobDataForPrompt(jobs);
 
     const systemPrompt =
+      "Today's date is " + new Date().toLocaleDateString('en-US', {weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'}) + ".\n\n" +
       "You are a job cost analyst assistant for Allen Bontrager Carpentry, a residential exterior contractor. " +
       "You have access to job profitability data from Acumatica ERP via OData sync.\n\n" +
       jobDataText +
