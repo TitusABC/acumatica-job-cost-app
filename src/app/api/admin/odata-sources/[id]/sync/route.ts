@@ -41,7 +41,8 @@ async function fetchAllRows(
 
 async function syncEntity(
   tableName: string,
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
+  excludedColumns: string[] = []
 ): Promise<void> {
   // Create table if not exists
   await supabaseAdmin.rpc("run_sql", {
@@ -52,6 +53,13 @@ async function syncEntity(
   await supabaseAdmin.rpc("run_sql", { query: `DELETE FROM ${tableName}` });
 
   if (rows.length === 0) return;
+
+  // Strip excluded columns if configured
+  if (excludedColumns.length > 0) {
+    rows = rows.map((row) =>
+      Object.fromEntries(Object.entries(row).filter(([k]) => !excludedColumns.includes(k)))
+    );
+  }
 
   // Insert all rows via json_array_elements to avoid param limits
   const jsonArray = JSON.stringify(rows);
@@ -115,7 +123,8 @@ export async function POST(
     const tableName = `odata_${entity.table_name}`;
     try {
       const rows = await fetchAllRows(source.odata_base_url, entity.entity_name, basicAuth);
-      await syncEntity(tableName, rows);
+      const excludedCols: string[] = (entity.transform_config as {excludedColumns?: string[]} | undefined)?.excludedColumns || [];
+      await syncEntity(tableName, rows, excludedCols);
 
       await supabaseAdmin
         .from("odata_entities")
