@@ -32,7 +32,6 @@ interface FilterConfig {
 interface TransformConfig {
   columns: ColumnConfig[];
   filters: FilterConfig[];
-  excludedColumns?: string[];
 }
 
 interface ODataEntity {
@@ -98,8 +97,6 @@ export default function AdminPage() {
   const [configEntity, setConfigEntity] = useState<{ entity: ODataEntity; sourceId: string } | null>(null);
   const [configColumns, setConfigColumns] = useState<ColumnConfig[]>([]);
   const [configFilters, setConfigFilters] = useState<FilterConfig[]>([]);
-  const [configExcludedColumns, setConfigExcludedColumns] = useState<string[]>([]);
-  const [configTab, setConfigTab] = useState<'columns' | 'import'>('columns');
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [availableFields, setAvailableFields] = useState<string[]>([]);
@@ -284,7 +281,6 @@ export default function AdminPage() {
         setConfigColumns(existingConfig.columns);
       }
       setConfigFilters(existingConfig.filters || []);
-      setConfigExcludedColumns(existingConfig.excludedColumns || []);
     } catch {
       setConfigColumns([]);
       setConfigFilters([]);
@@ -297,7 +293,7 @@ export default function AdminPage() {
     if (!configEntity) return;
     setConfigSaving(true);
     try {
-      const transform_config: TransformConfig = { columns: configColumns, filters: configFilters, excludedColumns: configExcludedColumns };
+      const transform_config: TransformConfig = { columns: configColumns, filters: configFilters };
       const res = await fetch(
         "/api/admin/odata-sources/" + configEntity.sourceId + "/entities/" + configEntity.entity.id + "/transform",
         {
@@ -539,22 +535,7 @@ export default function AdminPage() {
                   </div>
                 ) : (
                   <div className="p-6 space-y-6">
-                    {/* Tab buttons */}
-                    <div className="flex border-b border-gray-200 mb-4">
-                      <button
-                        onClick={() => setConfigTab('columns')}
-                        className={`px-4 py-2 text-sm font-medium border-b-2 ${configTab === 'columns' ? 'border-amber-500 text-amber-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
-                      >
-                        Column Config
-                      </button>
-                      <button
-                        onClick={() => setConfigTab('import')}
-                        className={`px-4 py-2 text-sm font-medium border-b-2 ${configTab === 'import' ? 'border-amber-500 text-amber-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
-                      >
-                        Import Columns
-                      </button>
-                    </div>
-                    {configTab === 'columns' && <div>
+                    <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-3">Column Configuration</h4>
                       <div className="border border-gray-200 rounded-lg overflow-hidden">
                         <table className="w-full text-xs">
@@ -665,39 +646,7 @@ export default function AdminPage() {
                         ))}
                         <button onClick={() => setConfigFilters([...configFilters, { field: availableFields[0] || "", operator: "gt", value: "0" }])} className="text-xs text-blue-600 hover:text-blue-700 font-medium">+ Add Filter</button>
                       </div>
-                    </div>}
-                    {configTab === 'import' && <div>
-                      <h4 className="text-sm font-semibold text-gray-700 mb-2">Import Columns</h4>
-                      <p className="text-xs text-gray-500 mb-3">Uncheck columns to exclude them from being stored during sync.</p>
-                      <div className="border border-gray-200 rounded-lg overflow-hidden max-h-60 overflow-y-auto">
-                        <table className="w-full text-xs">
-                          <thead className="bg-gray-50 sticky top-0">
-                            <tr>
-                              <th className="px-3 py-2 text-left font-medium text-gray-600 w-14">Import</th>
-                              <th className="px-3 py-2 text-left font-medium text-gray-600">Column</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-100">
-                            {availableFields.map((f) => (
-                              <tr key={f} className={configExcludedColumns.includes(f) ? 'opacity-40' : ''}>
-                                <td className="px-3 py-1.5 text-center">
-                                  <input
-                                    type="checkbox"
-                                    checked={!configExcludedColumns.includes(f)}
-                                    onChange={(e) => {
-                                      if (e.target.checked) setConfigExcludedColumns(configExcludedColumns.filter(c => c !== f));
-                                      else setConfigExcludedColumns([...configExcludedColumns, f]);
-                                    }}
-                                    className="rounded border-gray-300"
-                                  />
-                                </td>
-                                <td className="px-3 py-1.5 text-gray-700 font-mono">{f}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>}
+                    </div>
 
                     <div className="flex gap-3 pt-2 border-t border-gray-200">
                       <button onClick={handleSaveTransform} disabled={configSaving} className="bg-amber-400 hover:bg-amber-300 disabled:opacity-50 text-slate-900 font-semibold rounded-lg px-4 py-2 text-sm transition">
