@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getUser } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
 import { DB_SCHEMA } from "@/lib/schema";
+export const maxDuration = 60; // Allow up to 60s for multi-step Claude API calls
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY!,
