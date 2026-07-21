@@ -97,7 +97,7 @@ export default function ChatPage() {
           <p className="text-slate-400 text-xs mt-0.5">Acumatica Integration</p>
         </div>
 
-        {dataStatus && (
+        {(dataStatus === 'live' || dataStatus === 'demo') && (
           <div className="px-6 py-3 border-b border-slate-700">
             <span className={`inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-full font-medium ${
               dataStatus === "live" ? "bg-green-900/50 text-green-400"
