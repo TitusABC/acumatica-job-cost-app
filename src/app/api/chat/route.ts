@@ -1,135 +1,173 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { getUser } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { DB_SCHEMA } from "@/lib/schema";
-export const maxDuration = 60; // Allow up to 60s for multi-step Claude API calls
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY!,
-});
+interface JobData {
+  jobId: string;
+  jobName: string;
+  customer?: string;
+  tradeType: string;
+  status: string;
+  revenue: number;
+  cost: number;
+  profit: number;
+  marginPercent: number;
+}
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
+
+function formatJobDataForPrompt(jobs: JobData[], isDemo: boolean): string {
+  const demoNote = isDemo ? "NOTE: This is demo/sample data.\n\n" : "";
+  const summary = jobs.map((j) => ({
+    jobId: j.jobId,
+    jobName: j.jobName,
+    tradeType: j.tradeType,
+    status: j.status,
+    revenue: j.revenue,
+    cost: j.cost,
+    profit: j.profit,
+    marginPercent: j.marginPercent,
+  }));
+  const byTrade: Record<string, { revenue: number; cost: number; count: number }> = {};
+  let totalRevenue = 0,
+    totalCost = 0;
+  for (const j of jobs) {
+    if (!byTrade[j.tradeType]) byTrade[j.tradeType] = { revenue: 0, cost: 0, count: 0 };
+    byTrade[j.tradeType].revenue += j.revenue;
+    byTrade[j.tradeType].cost += j.cost;
+    byTrade[j.tradeType].count++;
+    totalRevenue += j.revenue;
+    totalCost += j.cost;
+  }
+  const totalProfit = totalRevenue - totalCost;
+  const overallMargin =
+    totalRevenue > 0 ? (((totalRevenue - totalCost) / totalRevenue) * 100).toFixed(1) : "0";
+  const tradeBreakdown = Object.entries(byTrade)
+    .map(([trade, stats]) => ({
+      trade,
+      jobCount: stats.count,
+      totalRevenue: stats.revenue,
+      totalCost: stats.cost,
+      totalProfit: stats.revenue - stats.cost,
+      margin:
+        stats.revenue > 0
+          ? (((stats.revenue - stats.cost) / stats.revenue) * 100).toFixed(1)
+          : "0",
+    }))
+    .sort((a, b) => b.totalRevenue - a.totalRevenue);
+  return `${demoNote}JOB DATA SUMMARY:\nTotal Jobs: ${jobs.length}\nTotal Revenue: $${totalRevenue.toLocaleString()}\nTotal Cost: $${totalCost.toLocaleString()}\nTotal Profit: $${totalProfit.toLocaleString()}\nOverall Margin: ${overallMargin}%\n\nBY TRADE TYPE:\n${tradeBreakdown
+    .map(
+      (t) =>
+        `  ${t.trade}: ${t.jobCount} jobs, Revenue $${t.totalRevenue.toLocaleString()}, Profit $${t.totalProfit.toLocaleString()}, Margin ${t.margin}%`
+    )
+    .join("\n")}\n\nINDIVIDUAL JOB DATA (JSON):\n${JSON.stringify(summary, null, 2)}`;
+}
+
+function sseEvent(data: object): string {
+  return `data: ${JSON.stringify(data)}\n\n`;
+}
 
 export async function POST(request: NextRequest) {
-  try {
-    const user = await getUser(request);
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { message } = await request.json();
-    if (!message?.trim()) {
-      return NextResponse.json({ error: "Message is required" }, { status: 400 });
-    }
-
-    const today = new Date().toLocaleDateString("en-US", {
-      weekday: "long",
-      year: "numeric",
-      month: "long",
-      day: "numeric",
+  const user = await getUser(request);
+  if (!user) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
     });
-
-    // Step 1: Generate SQL query
-    const sqlSystemPrompt = `You are a SQL expert. Generate a single PostgreSQL query to answer the user's question about job cost data.
-
-Today's date is ${today}.
-
-${DB_SCHEMA}
-
-Rules:
-- Return ONLY the SQL query, no explanation, no markdown, no backticks, no code fences
-- Always aggregate by job (GROUP BY TRIM(data->>'JobID')) unless the question is specifically about tasks
-- Always use TRIM() on JobID
-- Cast numeric fields: (NULLIF(data->>'FieldName',''))::numeric
-- Limit results to 100 rows max
-- For date conversions: DATE '1899-12-30' + (value::integer * INTERVAL '1 day')
-- If the question asks for totals/averages across all jobs, return a single summary row
-- If the question asks to rank or list jobs, ORDER BY the relevant metric DESC`;
-
-    let sqlQuery: string;
-    let queryResult: unknown;
-    let lastError: string | null = null;
-
-    // Try up to 3 times (initial + 2 retries on error)
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const userContent =
-        attempt === 0
-          ? message
-          : `The previous SQL query failed with error: ${lastError}
-
-Please fix the SQL and try again. Return ONLY the corrected SQL query.
-
-Original question: ${message}`;
-
-      const sqlResponse = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1024,
-        system: sqlSystemPrompt,
-        messages: [{ role: "user", content: userContent }],
-      });
-
-      sqlQuery = (sqlResponse.content[0] as { text: string }).text.trim();
-
-      // Strip any accidental markdown fences
-      sqlQuery = sqlQuery.replace(/^```sql\n?/i, "").replace(/```$/i, "").trim();
-
-      // Execute via Supabase RPC
-      const { data, error } = await supabaseAdmin.rpc("execute_query", {
-        query_text: sqlQuery,
-      });
-
-      if (error) {
-        lastError = error.message;
-        continue;
-      }
-
-      queryResult = data;
-      lastError = null;
-      break;
-    }
-
-    if (lastError) {
-      return NextResponse.json(
-        {
-          error: "Failed to generate a valid SQL query after 3 attempts",
-          details: lastError,
-        },
-        { status: 500 }
-      );
-    }
-
-    // Step 3: Interpret results
-    const answerResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 2048,
-      system: `You are a helpful business analyst for a construction company. Answer the user's question based on the database query results provided.
-Today's date is ${today}.
-Format dollar amounts as currency (e.g. $1,234,567). Format percentages to 1 decimal place.
-Be concise and direct. Lead with the key number or answer, then add brief context if useful.`,
-      messages: [
-        { role: "user", content: message },
-        {
-          role: "assistant",
-          content: `I queried the database and got these results: ${JSON.stringify(queryResult)}`,
-        },
-        {
-          role: "user",
-          content: "Based on those results, please answer my question.",
-        },
-      ],
-    });
-
-    const answer = (answerResponse.content[0] as { text: string }).text;
-
-    return NextResponse.json({
-      answer,
-      sql: sqlQuery!,
-      rowCount: Array.isArray(queryResult) ? queryResult.length : null,
-    });
-  } catch (error) {
-    console.error("Chat API error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
   }
+
+  const encoder = new TextEncoder();
+
+  const body = new ReadableStream({
+    async start(controller) {
+      const enqueue = (data: object) =>
+        controller.enqueue(encoder.encode(sseEvent(data)));
+
+      try {
+        const { message, conversationHistory } = await request.json();
+        if (!message?.trim()) {
+          enqueue({ type: "error", message: "Message is required" });
+          controller.close();
+          return;
+        }
+
+        enqueue({ type: "status", message: "Loading job data..." });
+
+        const { data: rows, error: dbError } = await supabaseAdmin
+          .from("job_data")
+          .select("data");
+
+        if (dbError || !rows || rows.length === 0) {
+          enqueue({
+            type: "text",
+            text: 'Job data has not been synced yet. Please ask an admin to click "Refresh Data Now" in the Admin panel to load data from Acumatica.',
+          });
+          enqueue({ type: "done" });
+          controller.close();
+          return;
+        }
+
+        const jobs = rows.map((r) => r.data as JobData);
+        const jobDataText = formatJobDataForPrompt(jobs, false);
+
+        const systemPrompt = `You are a job cost analyst assistant for Allen Bontrager Carpentry, a residential exterior contractor. You have access to job profitability data from Acumatica ERP.
+
+${jobDataText}
+
+Your role:
+- Answer questions about job margins, profitability by trade type, top/bottom performers, cost trends, etc.
+- Be concise and specific. Use dollar amounts and percentages when relevant.
+- Format numbers clearly (e.g., $12,500 not 12500, 28.5% not 0.285).
+- When listing multiple items, use bullet points or numbered lists.
+- If asked something outside the data scope, say so clearly.
+- Trade types include: Roofing, Siding, Decking, Windows & Doors, Gutters.`;
+
+        enqueue({ type: "status", message: "Analyzing job data..." });
+
+        const messages: Anthropic.MessageParam[] = [
+          ...(conversationHistory || []).map(
+            (m: { role: string; content: string }) => ({
+              role: m.role as "user" | "assistant",
+              content: m.content,
+            })
+          ),
+          { role: "user" as const, content: message },
+        ];
+
+        const stream = anthropic.messages.stream({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1024,
+          system: systemPrompt,
+          messages,
+        });
+
+        for await (const chunk of stream) {
+          if (
+            chunk.type === "content_block_delta" &&
+            chunk.delta.type === "text_delta"
+          ) {
+            enqueue({ type: "text", text: chunk.delta.text });
+          }
+        }
+
+        enqueue({ type: "done" });
+      } catch (err) {
+        console.error("Chat API error:", err);
+        const errMessage =
+          err instanceof Error ? err.message : "Failed to process request";
+        enqueue({ type: "error", message: errMessage });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
