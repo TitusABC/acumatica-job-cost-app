@@ -2,17 +2,41 @@ export const DB_SCHEMA = `
 Database table: odata_tw___job_cost
 Each row has a JSONB column called "data" containing job cost information.
 
-IMPORTANT: JobID values have trailing spaces — always use TRIM(data->>'JobID').
-IMPORTANT: Numeric fields are stored as text strings — cast with (NULLIF(data->>'FieldName',''))::numeric
-IMPORTANT: StartDate and EndDate are Excel serial date numbers (days since 1899-12-30), not real dates.
+CRITICAL RULES - follow these exactly or queries will fail:
+
+1. NUMERIC FIELDS: Never cast directly. Always use:
+   COALESCE((NULLIF(data->>'FieldName',''))::numeric, 0)
+
+2. DATE FIELDS (StartDate, EndDate): Stored as ISO timestamp strings like "2026-07-07T00:00:00".
+   They may be empty strings. Always guard with NULLIF before casting:
+   (NULLIF(data->>'EndDate',''))::timestamp
+
+   Safe date filter pattern:
+   NULLIF(data->>'EndDate','') IS NOT NULL
+   AND (NULLIF(data->>'EndDate',''))::timestamp >= [date expression]
+
+   NEVER do: (data->>'EndDate')::timestamp — crashes on empty strings.
+   NEVER do: (data->>'EndDate')::integer — dates are NOT Excel serial numbers.
+
+3. JOBID: Always TRIM(data->>'JobID') and filter WHERE TRIM(data->>'JobID') != ''
+
+4. AGGREGATION: Always GROUP BY TRIM(data->>'JobID') when calculating per-job metrics
+
+5. LIMIT: Put LIMIT on the outer query, never inside a subquery that feeds an aggregate (AVG, SUM, COUNT)
+
+Safe date filter example (jobs ending last month):
+WHERE TRIM(data->>'JobID') != ''
+  AND NULLIF(data->>'EndDate','') IS NOT NULL
+  AND (NULLIF(data->>'EndDate',''))::timestamp >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+  AND (NULLIF(data->>'EndDate',''))::timestamp < DATE_TRUNC('month', CURRENT_DATE)
 
 Available fields in the data JSONB column:
 - JobID: text — unique job identifier (e.g. "22123")
 - Description: text — job description/name
 - Task: text — task code within the job (e.g. "CONTRACT", "LABOR")
 - Branch: text — branch/division (e.g. "ABC1", "ABC2")
-- StartDate: text — Excel serial date number (convert with: DATE '1899-12-30' + interval '1 day' * value::integer)
-- EndDate: text — Excel serial date number
+- StartDate: text — ISO timestamp string (e.g. "2026-01-15T00:00:00"), may be empty. Safe cast: (NULLIF(data->>'StartDate',''))::timestamp
+- EndDate: text — ISO timestamp string (e.g. "2026-07-07T00:00:00"), may be empty. Safe cast: (NULLIF(data->>'EndDate',''))::timestamp
 - ActualRevenue: numeric text — actual revenue billed
 - BudgetedRevenue: numeric text — budgeted/contracted revenue
 - ActualLabor: numeric text — actual labor costs
@@ -33,7 +57,7 @@ Common derived calculations:
 - Budget Variance = BudgetedRevenue - ActualRevenue
 
 To aggregate by job (since each job has multiple task rows):
-SELECT 
+SELECT
   TRIM(data->>'JobID') as job_id,
   MAX(data->>'Description') as description,
   MAX(data->>'Branch') as branch,
