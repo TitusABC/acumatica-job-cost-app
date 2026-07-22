@@ -57,6 +57,15 @@ interface ODataSource {
   entities: ODataEntity[];
 }
 
+interface ChatErrorLog {
+  id: string;
+  created_at: string;
+  user_question: string;
+  generated_sql: string | null;
+  error_message: string;
+  error_type: string;
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -103,6 +112,12 @@ export default function AdminPage() {
   const [newCalcName, setNewCalcName] = useState("");
   const [newCalcFormula, setNewCalcFormula] = useState("");
 
+  // Error log state
+  const [errorLogs, setErrorLogs] = useState<ChatErrorLog[]>([]);
+  const [errorLogsLoading, setErrorLogsLoading] = useState(false);
+  const [clearingLogs, setClearingLogs] = useState(false);
+  const [expandedSql, setExpandedSql] = useState<string | null>(null);
+
   useEffect(() => {
     fetch("/api/auth/me")
       .then((r) => r.json())
@@ -112,6 +127,7 @@ export default function AdminPage() {
       });
     loadUsers();
     loadSources();
+    loadErrorLogs();
   }, []);
 
   async function loadUsers() {
@@ -313,6 +329,32 @@ export default function AdminPage() {
     }
   }
 
+  async function loadErrorLogs() {
+    setErrorLogsLoading(true);
+    try {
+      const res = await fetch("/api/admin/error-logs");
+      const data = await res.json();
+      if (data.logs) setErrorLogs(data.logs);
+    } catch {
+      // ignore
+    } finally {
+      setErrorLogsLoading(false);
+    }
+  }
+
+  async function clearErrorLogs() {
+    if (!confirm("Clear all error logs? This cannot be undone.")) return;
+    setClearingLogs(true);
+    try {
+      await fetch("/api/admin/error-logs", { method: "DELETE" });
+      setErrorLogs([]);
+    } catch {
+      // ignore
+    } finally {
+      setClearingLogs(false);
+    }
+  }
+
   return (
     <div className="flex h-screen bg-gray-100">
       <aside className="w-64 bg-slate-800 flex flex-col flex-shrink-0">
@@ -465,7 +507,7 @@ export default function AdminPage() {
                           {source.entities.map(ent => (
                             <tr key={ent.id} className="border-b border-gray-50">
                               <td className="py-1.5 text-gray-800">{ent.display_name || ent.entity_name}</td>
-                              <td className="py-1.5 text-gray-600">{ent.last_row_count != null ? ent.last_row_count : "â"}</td>
+                              <td className="py-1.5 text-gray-600">{ent.last_row_count != null ? ent.last_row_count : "—"}</td>
                               <td className="py-1.5 text-gray-500">{ent.last_synced_at ? new Date(ent.last_synced_at).toLocaleString() : "Never"}</td>
                               <td className="py-1.5">{ent.last_error ? <span className="text-red-500">{ent.last_error.slice(0, 40)}</span> : <span className="text-green-500">OK</span>}</td>
                               <td className="py-1.5">
@@ -660,7 +702,7 @@ export default function AdminPage() {
             </div>
           )}
 
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
             <div className="px-6 py-4 border-b border-gray-200">
               <h3 className="text-base font-semibold text-gray-800">Users</h3>
             </div>
@@ -698,6 +740,87 @@ export default function AdminPage() {
                       </tr>
                     ))
                   )}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Error Log */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-gray-800">Error Log</h3>
+                <p className="text-sm text-gray-500">Recent chat query failures (last 50)</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={loadErrorLogs}
+                  disabled={errorLogsLoading}
+                  className="text-sm text-gray-500 hover:text-gray-700 font-medium transition disabled:opacity-50"
+                >
+                  {errorLogsLoading ? "Loading..." : "Refresh"}
+                </button>
+                <button
+                  onClick={clearErrorLogs}
+                  disabled={clearingLogs || errorLogs.length === 0}
+                  className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 disabled:opacity-50 text-red-600 font-semibold rounded-lg px-3 py-1.5 text-sm transition"
+                >
+                  {clearingLogs ? "Clearing..." : "Clear All"}
+                </button>
+              </div>
+            </div>
+            {errorLogsLoading ? (
+              <div className="flex items-center justify-center h-40">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-400" />
+              </div>
+            ) : errorLogs.length === 0 ? (
+              <p className="px-6 py-10 text-center text-gray-400 text-sm">No errors logged.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="text-left px-6 py-3 font-semibold text-gray-600 w-36">Time</th>
+                    <th className="text-left px-6 py-3 font-semibold text-gray-600">Question</th>
+                    <th className="text-left px-6 py-3 font-semibold text-gray-600">Error</th>
+                    <th className="text-left px-6 py-3 font-semibold text-gray-600 w-20">SQL</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {errorLogs.map((log) => (
+                    <tr key={log.id} className="hover:bg-gray-50 transition align-top">
+                      <td className="px-6 py-3 text-gray-500 text-xs whitespace-nowrap">
+                        {new Date(log.created_at).toLocaleString()}
+                      </td>
+                      <td className="px-6 py-3 text-gray-800 max-w-xs">
+                        <span className="line-clamp-2 text-sm">{log.user_question}</span>
+                      </td>
+                      <td className="px-6 py-3 max-w-xs">
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 mr-1.5">
+                          {log.error_type}
+                        </span>
+                        <span className="text-red-600 text-sm">{log.error_message}</span>
+                      </td>
+                      <td className="px-6 py-3">
+                        {log.generated_sql ? (
+                          <div>
+                            <button
+                              onClick={() => setExpandedSql(expandedSql === log.id ? null : log.id)}
+                              className="text-blue-600 hover:text-blue-800 text-xs font-medium underline"
+                            >
+                              {expandedSql === log.id ? "Hide" : "Show"}
+                            </button>
+                            {expandedSql === log.id && (
+                              <pre className="mt-2 text-xs bg-gray-50 border border-gray-200 rounded p-2 overflow-x-auto whitespace-pre-wrap max-w-xs">
+                                {log.generated_sql}
+                              </pre>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-gray-400 text-xs">none</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             )}
