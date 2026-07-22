@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { getUser } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase";
@@ -41,8 +41,8 @@ CRITICAL SAFE PATTERNS (use these exactly):
 -- Numeric cast: COALESCE((NULLIF(data->>'FieldName',''))::numeric, 0)
 -- Date cast: (NULLIF(data->>'EndDate',''))::timestamp
 -- Date filter (never cast directly, always use NULLIF first):
-   AND NULLIF(data->>'EndDate','') IS NOT NULL
-   AND (NULLIF(data->>'EndDate',''))::timestamp >= '2026-06-01'
+AND NULLIF(data->>'EndDate','') IS NOT NULL
+AND (NULLIF(data->>'EndDate',''))::timestamp >= '2026-06-01'
 -- JobID: always TRIM(data->>'JobID') and WHERE TRIM(data->>'JobID') != ''
 
 JOB-LEVEL AGGREGATION PATTERN (use this as your template):
@@ -72,58 +72,123 @@ Return ONLY the SQL query. No markdown, no backticks, no explanation.`;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
+function sse(data: object): string {
+  return `data: ${JSON.stringify(data)}\n\n`;
+}
+
 export async function POST(request: NextRequest) {
   const user = await getUser(request);
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  try {
-    const { message, history } = await request.json();
-    if (!message?.trim()) return NextResponse.json({ error: "Message is required" }, { status: 400 });
-
-    // Step 1: Generate SQL with Haiku
-    const sqlGen = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      system: `You are a PostgreSQL expert. Generate a SQL query to answer the user's question using the schema below.\n\n${DB_SCHEMA}`,
-      messages: [{ role: "user", content: message }],
+  if (!user) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
     });
-    const sql = sqlGen.content[0].type === "text" ? sqlGen.content[0].text.trim() : "";
+  }
 
-    if (!sql.toUpperCase().startsWith("SELECT")) {
-      return NextResponse.json({ response: "I couldn't generate a valid query for that question. Try rephrasing." });
-    }
+  let message: string;
+  let conversationHistory: { role: string; content: string }[] = [];
+  try {
+    const body = await request.json();
+    message = body.message;
+    conversationHistory = body.conversationHistory || [];
+  } catch {
+    return new Response(JSON.stringify({ error: "Invalid JSON" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
-    // Step 2: Execute SQL via Supabase RPC
-    // NOTE: query_text must be trimmed — execute_query checks it starts with SELECT
-    const { data: rows, error: dbError } = await supabaseAdmin.rpc("execute_query", { query_text: sql });
-    if (dbError) {
-      console.error("DB error:", dbError, "SQL:", sql);
-      return NextResponse.json({ response: "There was a database error. Please try rephrasing your question." });
-    }
+  if (!message?.trim()) {
+    return new Response(JSON.stringify({ error: "Message is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
-    // Step 3: Format results into natural language with Haiku
-    const messages: Anthropic.MessageParam[] = [
-      ...(history || []).map((m: { role: string; content: string }) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      })),
-      { role: "user" as const, content: message },
-    ];
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      const send = (data: object) => controller.enqueue(enc.encode(sse(data)));
 
-    const formatResp = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      system: `You are a job cost analyst for Allen Bontrager Carpentry, a residential exterior contractor. Answer the user's question based on the query results below. Be concise and specific. Format numbers clearly ($12,500 not 12500, 28.5% not 0.285). Use bullet points for lists.
+      try {
+        send({ type: "status", message: "Generating query..." });
+
+        // Step 1: Generate SQL with Haiku
+        const sqlGen = await anthropic.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1024,
+          system: `You are a PostgreSQL expert. Generate a SQL query to answer the user's question using the schema below.\n\n${DB_SCHEMA}`,
+          messages: [{ role: "user", content: message }],
+        });
+        const sql =
+          sqlGen.content[0].type === "text"
+            ? sqlGen.content[0].text.trim()
+            : "";
+
+        if (!sql.toUpperCase().startsWith("SELECT")) {
+          send({ type: "text", text: "I couldn't generate a valid query for that question. Try rephrasing." });
+          send({ type: "done" });
+          controller.close();
+          return;
+        }
+
+        send({ type: "status", message: "Running query..." });
+
+        // Step 2: Execute SQL via Supabase RPC
+        const { data: rows, error: dbError } = await supabaseAdmin.rpc(
+          "execute_query",
+          { query_text: sql }
+        );
+        if (dbError) {
+          console.error("DB error:", dbError, "SQL:", sql);
+          send({ type: "text", text: "There was a database error. Please try rephrasing your question." });
+          send({ type: "done" });
+          controller.close();
+          return;
+        }
+
+        send({ type: "status", message: "Formatting response..." });
+
+        // Step 3: Format results into natural language with Haiku
+        const messages: Anthropic.MessageParam[] = [
+          ...conversationHistory.map((m) => ({
+            role: m.role as "user" | "assistant",
+            content: m.content,
+          })),
+          { role: "user" as const, content: message },
+        ];
+
+        const formatResp = await anthropic.messages.create({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 1024,
+          system: `You are a job cost analyst for Allen Bontrager Carpentry, a residential exterior contractor. Answer the user's question based on the query results below. Be concise and specific. Format numbers clearly ($12,500 not 12500, 28.5% not 0.285). Use bullet points for lists.
 
 SQL Results (JSON):
 ${JSON.stringify(rows, null, 2)}`,
-      messages,
-    });
+          messages,
+        });
 
-    const responseText = formatResp.content[0].type === "text" ? formatResp.content[0].text : "";
-    return NextResponse.json({ response: responseText });
-  } catch (err) {
-    console.error("Chat API error:", err);
-    return NextResponse.json({ error: "Failed to process request" }, { status: 500 });
-  }
+        const responseText =
+          formatResp.content[0].type === "text"
+            ? formatResp.content[0].text
+            : "";
+
+        send({ type: "text", text: responseText });
+        send({ type: "done" });
+      } catch (err) {
+        console.error("Chat API error:", err);
+        send({ type: "error", message: "Failed to process request" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
