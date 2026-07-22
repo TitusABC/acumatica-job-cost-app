@@ -38,6 +38,10 @@ RULES:
 - Return ONLY the SQL query, no markdown, no backticks, no explanation
 `;
 
+function cleanSql(raw: string): string {
+  return raw.trim().replace(/;+\s*$/, "");
+}
+
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
@@ -54,8 +58,11 @@ export async function POST(request: NextRequest) {
         controller.enqueue(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
       };
 
+      let userQuestion = "";
+
       try {
         const { message, history, conversationHistory } = await request.json();
+        userQuestion = message || "";
         const hist = history || conversationHistory || [];
         if (!message?.trim()) {
           send({ type: "error", message: "Message is required" });
@@ -79,23 +86,75 @@ ${DB_SCHEMA}`,
           messages: [{ role: "user", content: message }],
         });
 
-        const sql = sqlResponse.content[0].type === "text" ? sqlResponse.content[0].text.trim() : "";
+        let sql = cleanSql(
+          sqlResponse.content[0].type === "text" ? sqlResponse.content[0].text : ""
+        );
 
-        if (!sql || (!sql.toLowerCase().startsWith("select") && !sql.toLowerCase().startsWith("with"))) {
-          send({ type: "error", message: "Could not generate a valid SQL query for that question.", sql });
-          controller.close();
-          return;
-        }
-
-        // Step 2: Execute SQL
+        // Step 2: Execute SQL — up to 3 attempts with Haiku fixing on failure
         send({ type: "status", message: "Running database query..." });
 
-        const { data: queryResult, error: queryError } = await supabaseAdmin.rpc("execute_query", {
-          query_text: sql,
-        });
+        let queryResult = null;
+        let lastError = "";
+        let succeeded = false;
 
-        if (queryError) {
-          send({ type: "error", message: `Database query failed: ${queryError.message}`, sql });
+        for (let attempt = 0; attempt < 3; attempt++) {
+          // Validate SQL shape
+          if (!sql || (!sql.toLowerCase().startsWith("select") && !sql.toLowerCase().startsWith("with"))) {
+            lastError = "Generated query is not a valid SELECT statement.";
+            if (attempt < 2) {
+              send({ type: "status", message: `Refining query (attempt ${attempt + 2} of 3)...` });
+              const fixResponse = await anthropic.messages.create({
+                model: "claude-haiku-4-5-20251001",
+                max_tokens: 1024,
+                system: `You are a SQL expert. Fix the given SQL query and return ONLY the corrected SQL, no markdown, no backticks, no explanation.
+${DB_SCHEMA}`,
+                messages: [{
+                  role: "user",
+                  content: `The following SQL query failed with this error: ${lastError}\n\nHere was the query:\n${sql || "(empty)"}\n\nPlease fix it and return only the corrected SQL query.`,
+                }],
+              });
+              sql = cleanSql(fixResponse.content[0].type === "text" ? fixResponse.content[0].text : "");
+              continue;
+            }
+            break;
+          }
+
+          const { data, error } = await supabaseAdmin.rpc("execute_query", {
+            query_text: sql,
+          });
+
+          if (!error) {
+            queryResult = data;
+            succeeded = true;
+            break;
+          }
+
+          lastError = error.message;
+
+          if (attempt < 2) {
+            send({ type: "status", message: `Refining query (attempt ${attempt + 2} of 3)...` });
+            const fixResponse = await anthropic.messages.create({
+              model: "claude-haiku-4-5-20251001",
+              max_tokens: 1024,
+              system: `You are a SQL expert. Fix the given SQL query and return ONLY the corrected SQL, no markdown, no backticks, no explanation.
+${DB_SCHEMA}`,
+              messages: [{
+                role: "user",
+                content: `The following SQL query failed with this error: ${lastError}\n\nHere was the query:\n${sql}\n\nPlease fix it and return only the corrected SQL query.`,
+              }],
+            });
+            sql = cleanSql(fixResponse.content[0].type === "text" ? fixResponse.content[0].text : "");
+          }
+        }
+
+        if (!succeeded) {
+          await supabaseAdmin.from("chat_error_logs").insert({
+            user_question: message,
+            generated_sql: sql,
+            error_message: lastError,
+            error_type: lastError.includes("execute_query") ? "function_not_found" : "query_execution",
+          });
+          send({ type: "error", message: "Sorry, I wasn't able to answer that question. An error was logged for review." });
           controller.close();
           return;
         }
@@ -140,8 +199,16 @@ Format currency as $X,XXX. Format percentages as XX.X%. Use bullet points for li
         send({ type: "done", sql });
         controller.close();
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Unknown error";
-        send({ type: "error", message });
+        const errMsg = err instanceof Error ? err.message : "Unknown error";
+        try {
+          await supabaseAdmin.from("chat_error_logs").insert({
+            user_question: userQuestion,
+            generated_sql: null,
+            error_message: errMsg,
+            error_type: "unexpected",
+          });
+        } catch { /* ignore logging errors */ }
+        send({ type: "error", message: "Sorry, I wasn't able to answer that question. An error was logged for review." });
         controller.close();
       }
     },
