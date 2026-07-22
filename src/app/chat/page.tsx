@@ -15,7 +15,6 @@ interface UserInfo {
 
 interface ErrorLog {
   message: string;
-  sql?: string;
 }
 
 export default function ChatPage() {
@@ -147,8 +146,7 @@ export default function ChatPage() {
             });
           } else if (event.type === "error") {
             setErrorLog({
-              message: event.message ?? "Unknown error",
-              sql: event.sql,
+              message: event.message ?? "An error occurred. Please try again.",
             });
             const fallback = accumulatedText || "I encountered an error while processing your request.";
             setMessages((prev) => {
@@ -304,22 +302,12 @@ export default function ChatPage() {
         </header>
 
         {errorLog && (
-          <div className="mx-6 mt-4 bg-red-50 border border-red-200 rounded-xl p-4 flex-shrink-0">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-red-700 mb-1">
-                  Query Error
-                </p>
-                <p className="text-sm text-red-600">{errorLog.message}</p>
-                {errorLog.sql && (
-                  <pre className="mt-2 text-xs text-red-500 bg-red-100 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-all">
-                    {errorLog.sql}
-                  </pre>
-                )}
-              </div>
+          <div className="mx-6 mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 flex-shrink-0">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-amber-700">{errorLog.message}</p>
               <button
                 onClick={() => setErrorLog(null)}
-                className="text-red-400 hover:text-red-600 transition flex-shrink-0 mt-0.5"
+                className="text-amber-400 hover:text-amber-600 transition flex-shrink-0"
                 aria-label="Dismiss error"
               >
                 <svg
