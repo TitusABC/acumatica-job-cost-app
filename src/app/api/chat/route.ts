@@ -18,7 +18,7 @@ Each row has a JSONB column called "data" with these fields:
 - Description (text — job name)
 - Task (text — task code like "CONTRACT", "LABOR")
 - Branch (text — division like "ABC1", "ABC2", "QC1")
-- StartDate, EndDate (text — Excel serial date numbers, days since 1899-12-30)
+- StartDate, EndDate (text — ISO timestamp strings like "2026-07-07T00:00:00", may be empty strings)
 - ActualRevenue, BudgetedRevenue (numeric stored as text)
 - ActualLabor, BudgetedLabor (numeric stored as text)
 - ActualSubs, BudgetedSubs (numeric stored as text)
@@ -26,16 +26,24 @@ Each row has a JSONB column called "data" with these fields:
 - ActualDisposal, BudgetedDisposal (numeric stored as text)
 - ActualOther, BudgetedOther (numeric stored as text)
 
-RULES:
-- Always TRIM(data->>'JobID') and filter WHERE TRIM(data->>'JobID') != ''
-- Cast numeric fields: COALESCE((NULLIF(data->>'FieldName',''))::numeric, 0)
-- Each job has multiple task rows — always GROUP BY TRIM(data->>'JobID') when analyzing jobs
-- Total cost = ActualLabor + ActualSubs + ActualMaterials + ActualDisposal + ActualOther
-- Profit = ActualRevenue - Total cost
-- Margin = Profit / ActualRevenue * 100 (when ActualRevenue > 0)
-- Date conversion: DATE '1899-12-30' + (value::integer * INTERVAL '1 day')
-- Limit results to 100 rows max
-- Return ONLY the SQL query, no markdown, no backticks, no explanation
+CRITICAL RULES:
+1. Always TRIM(data->>'JobID') and filter WHERE TRIM(data->>'JobID') != ''
+2. Cast numeric fields: COALESCE((NULLIF(data->>'FieldName',''))::numeric, 0)
+3. Each job has multiple task rows — always GROUP BY TRIM(data->>'JobID') when analyzing jobs
+4. Total cost = ActualLabor + ActualSubs + ActualMaterials + ActualDisposal + ActualOther
+5. Profit = ActualRevenue - Total cost
+6. Margin = Profit / ActualRevenue * 100 (when ActualRevenue > 0)
+7. DATE FIELDS: Always guard with NULLIF before casting — NEVER cast directly.
+   CORRECT: (NULLIF(data->>'EndDate',''))::timestamp
+   WRONG: (data->>'EndDate')::timestamp  -- crashes on empty strings
+   WRONG: (data->>'EndDate')::integer    -- dates are NOT Excel serial numbers
+8. Safe date filter example (jobs ending last month):
+   WHERE TRIM(data->>'JobID') != ''
+     AND NULLIF(data->>'EndDate','') IS NOT NULL
+     AND (NULLIF(data->>'EndDate',''))::timestamp >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+     AND (NULLIF(data->>'EndDate',''))::timestamp < DATE_TRUNC('month', CURRENT_DATE)
+9. Limit results to 100 rows max
+10. Return ONLY the SQL query, no markdown, no backticks, no explanation
 `;
 
 function cleanSql(raw: string): string {
