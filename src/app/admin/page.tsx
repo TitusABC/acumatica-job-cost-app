@@ -32,6 +32,7 @@ interface FilterConfig {
 interface TransformConfig {
   columns: ColumnConfig[];
   filters: FilterConfig[];
+  excludedColumns?: string[];
 }
 
 interface ODataEntity {
@@ -111,6 +112,11 @@ export default function AdminPage() {
   const [availableFields, setAvailableFields] = useState<string[]>([]);
   const [newCalcName, setNewCalcName] = useState("");
   const [newCalcFormula, setNewCalcFormula] = useState("");
+
+  // Column exclusion state
+  const [excludedCols, setExcludedCols] = useState<Set<string>>(new Set());
+  const [newExcludeInput, setNewExcludeInput] = useState("");
+  const [excludeSearch, setExcludeSearch] = useState("");
 
   // Error log state
   const [errorLogs, setErrorLogs] = useState<ChatErrorLog[]>([]);
@@ -285,21 +291,26 @@ export default function AdminPage() {
     setConfigLoading(true);
     setNewCalcName("");
     setNewCalcFormula("");
+    setNewExcludeInput("");
+    setExcludeSearch("");
+    setExcludedCols(new Set());
     try {
       const res = await fetch("/api/admin/odata-sources/" + sourceId + "/entities/" + ent.id + "/transform");
       const d = await res.json();
       const fields: string[] = d.columns || [];
       setAvailableFields(fields);
-      const existingConfig: TransformConfig = d.entity?.transform_config || { columns: [], filters: [] };
+      const existingConfig: TransformConfig = d.entity?.transform_config || { columns: [], filters: [], excludedColumns: [] };
       if (!existingConfig.columns || existingConfig.columns.length === 0) {
         setConfigColumns(fields.map((field) => ({ field, label: field, visible: true, type: "string" as const })));
       } else {
         setConfigColumns(existingConfig.columns);
       }
       setConfigFilters(existingConfig.filters || []);
+      setExcludedCols(new Set(existingConfig.excludedColumns || []));
     } catch {
       setConfigColumns([]);
       setConfigFilters([]);
+      setExcludedCols(new Set());
     } finally {
       setConfigLoading(false);
     }
@@ -309,7 +320,11 @@ export default function AdminPage() {
     if (!configEntity) return;
     setConfigSaving(true);
     try {
-      const transform_config: TransformConfig = { columns: configColumns, filters: configFilters };
+      const transform_config: TransformConfig = {
+        columns: configColumns,
+        filters: configFilters,
+        excludedColumns: Array.from(excludedCols),
+      };
       const res = await fetch(
         "/api/admin/odata-sources/" + configEntity.sourceId + "/entities/" + configEntity.entity.id + "/transform",
         {
@@ -327,6 +342,27 @@ export default function AdminPage() {
     } finally {
       setConfigSaving(false);
     }
+  }
+
+  // All columns that could be excluded: available from data + any custom ones the user added
+  function allExclusionColumns(): string[] {
+    const custom = Array.from(excludedCols).filter(c => !availableFields.includes(c));
+    return [...availableFields, ...custom];
+  }
+
+  function handleAddCustomExclusion() {
+    const col = newExcludeInput.trim();
+    if (!col) return;
+    setExcludedCols(prev => new Set([...prev, col]));
+    setNewExcludeInput("");
+  }
+
+  function handleSelectAll() {
+    setExcludedCols(new Set()); // exclude nothing = include all
+  }
+
+  function handleDeselectAll() {
+    setExcludedCols(new Set(allExclusionColumns())); // exclude everything
   }
 
   async function loadErrorLogs() {
@@ -561,14 +597,14 @@ export default function AdminPage() {
           {configEntity && (
             <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 overflow-auto">
               <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-screen overflow-auto">
-                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 sticky top-0 bg-white">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 sticky top-0 bg-white z-10">
                   <div>
                     <h3 className="text-base font-semibold text-gray-800">
                       Configure: {configEntity.entity.display_name || configEntity.entity.entity_name}
                     </h3>
-                    <p className="text-xs text-gray-500 mt-0.5">Column visibility, labels, calculated fields, and row filters</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Column exclusions, visibility, labels, calculated fields, and row filters</p>
                   </div>
-                  <button onClick={() => setConfigEntity(null)} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">x</button>
+                  <button onClick={() => setConfigEntity(null)} className="text-gray-400 hover:text-gray-600 text-xl font-light leading-none">×</button>
                 </div>
 
                 {configLoading ? (
@@ -577,8 +613,113 @@ export default function AdminPage() {
                   </div>
                 ) : (
                   <div className="p-6 space-y-6">
+
+                    {/* ── Column Exclusion ── */}
                     <div>
-                      <h4 className="text-sm font-semibold text-gray-700 mb-3">Column Configuration</h4>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-sm font-semibold text-gray-700">Column Exclusion</h4>
+                          {excludedCols.size > 0 && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                              {excludedCols.size} excluded
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={handleSelectAll}
+                            className="text-xs text-blue-600 hover:text-blue-800 font-medium border border-blue-200 rounded px-2 py-1 hover:bg-blue-50"
+                          >
+                            Include All
+                          </button>
+                          <button
+                            onClick={handleDeselectAll}
+                            className="text-xs text-gray-600 hover:text-gray-800 font-medium border border-gray-200 rounded px-2 py-1 hover:bg-gray-50"
+                          >
+                            Exclude All
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500 mb-3">
+                        Checked columns are included in the import. Uncheck to strip them from the data during sync.
+                      </p>
+
+                      {/* Search filter */}
+                      <input
+                        type="text"
+                        value={excludeSearch}
+                        onChange={e => setExcludeSearch(e.target.value)}
+                        placeholder="Filter columns..."
+                        className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs mb-2 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                      />
+
+                      {/* Column checklist */}
+                      <div className="border border-gray-200 rounded-lg overflow-hidden">
+                        <div className="max-h-56 overflow-y-auto divide-y divide-gray-100">
+                          {allExclusionColumns()
+                            .filter(col => !excludeSearch || col.toLowerCase().includes(excludeSearch.toLowerCase()))
+                            .map(col => {
+                              const isExcluded = excludedCols.has(col);
+                              const isCustom = !availableFields.includes(col);
+                              return (
+                                <label key={col} className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50 ${isExcluded ? "bg-red-50" : ""}`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={!isExcluded}
+                                    onChange={e => {
+                                      setExcludedCols(prev => {
+                                        const next = new Set(prev);
+                                        if (e.target.checked) {
+                                          next.delete(col);
+                                        } else {
+                                          next.add(col);
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                    className="rounded border-gray-300 text-amber-500"
+                                  />
+                                  <span className={`text-xs font-mono flex-1 ${isExcluded ? "line-through text-gray-400" : "text-gray-700"}`}>
+                                    {col}
+                                  </span>
+                                  {isCustom && (
+                                    <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-600 rounded font-medium">custom</span>
+                                  )}
+                                  {isExcluded && (
+                                    <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-500 rounded font-medium">excluded</span>
+                                  )}
+                                </label>
+                              );
+                            })}
+                          {allExclusionColumns().filter(col => !excludeSearch || col.toLowerCase().includes(excludeSearch.toLowerCase())).length === 0 && (
+                            <p className="px-3 py-4 text-xs text-gray-400 text-center">No columns match your filter.</p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Add custom column to exclude */}
+                      <div className="flex gap-2 mt-2">
+                        <input
+                          type="text"
+                          value={newExcludeInput}
+                          onChange={e => setNewExcludeInput(e.target.value)}
+                          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); handleAddCustomExclusion(); } }}
+                          placeholder="Type a column name to exclude (e.g. BaseType_7)..."
+                          className="flex-1 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-amber-400"
+                        />
+                        <button
+                          onClick={handleAddCustomExclusion}
+                          disabled={!newExcludeInput.trim()}
+                          className="text-xs bg-red-50 hover:bg-red-100 text-red-600 font-semibold border border-red-200 rounded-lg px-3 py-1.5 disabled:opacity-40 whitespace-nowrap"
+                        >
+                          + Exclude
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* ── Column Configuration ── */}
+                    <div>
+                      <h4 className="text-sm font-semibold text-gray-700 mb-3">Column Configuration <span className="text-xs font-normal text-gray-400">(for chat display)</span></h4>
                       <div className="border border-gray-200 rounded-lg overflow-hidden">
                         <table className="w-full text-xs">
                           <thead className="bg-gray-50">
@@ -623,7 +764,7 @@ export default function AdminPage() {
                                       {col.type}
                                     </span>
                                     {col.type === "calculated" && (
-                                      <button onClick={() => setConfigColumns(configColumns.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 font-bold ml-1">x</button>
+                                      <button onClick={() => setConfigColumns(configColumns.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 font-bold ml-1">×</button>
                                     )}
                                   </div>
                                 </td>
@@ -650,6 +791,7 @@ export default function AdminPage() {
                       </div>
                     </div>
 
+                    {/* ── Row Filters ── */}
                     <div>
                       <h4 className="text-sm font-semibold text-gray-700 mb-3">Row Filters <span className="text-xs font-normal text-gray-400">(combined with AND)</span></h4>
                       <div className="space-y-2">
@@ -683,7 +825,7 @@ export default function AdminPage() {
                                 setConfigFilters(next);
                               }} placeholder="Value" className="border border-gray-300 rounded px-2 py-1 text-xs flex-1" />
                             )}
-                            <button onClick={() => setConfigFilters(configFilters.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 font-bold">x</button>
+                            <button onClick={() => setConfigFilters(configFilters.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 font-bold">×</button>
                           </div>
                         ))}
                         <button onClick={() => setConfigFilters([...configFilters, { field: availableFields[0] || "", operator: "gt", value: "0" }])} className="text-xs text-blue-600 hover:text-blue-700 font-medium">+ Add Filter</button>
